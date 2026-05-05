@@ -2155,20 +2155,21 @@ def decode_arc19_reserve(reserve_address: str) -> str | None:
 
 async def fetch_live_image_url(asa_id: str) -> str | None:
     """
-    Fetch the current image URL for a MONSTR ASA from the Algorand indexer.
-    ARC19 assets store metadata in the asset URL as a template:
-      template-ipfs://{ipfscid:1:raw:reserve:sha2-256}
-    The actual IPFS CID is encoded in the reserve address field.
-    We fetch the asset params and extract the URL field, then decode the reserve.
-    Falls back to stored hash in MONSTR_ASSETS if fetch fails.
+    ARC19 two-step image fetch:
+      1. Decode reserve address → metadata CID
+      2. Fetch metadata JSON from IPFS → extract image CID
+      3. Return direct image URL
+
+    Falls back to stored hash in MONSTR_ASSETS if any step fails.
     """
     import urllib.request
     import json
 
     indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
-    url = f"{indexer_url}/v2/assets/{asa_id}"
 
     try:
+        # Step 1: Get asset params from indexer
+        url = f"{indexer_url}/v2/assets/{asa_id}"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
@@ -2181,22 +2182,35 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
         asset_url = params.get("url", "")
         reserve = params.get("reserve")
 
-        # ARC19: URL is template-ipfs://{ipfscid:...}
-        # The reserve address encodes the CID — decode it to base58 (Qm...) CID
+        # Step 2: Decode reserve → metadata CID
+        metadata_cid = None
         if "template-ipfs" in asset_url and reserve:
-            cid = decode_arc19_reserve(reserve)
-            if cid:
-                print(f"[ARC19] Live CID for ASA {asa_id}: {cid}")
-                return f"{IPFS_GATEWAY}{cid}"
+            metadata_cid = decode_arc19_reserve(reserve)
+        elif asset_url.startswith("ipfs://"):
+            metadata_cid = asset_url.replace("ipfs://", "")
 
-        # Fallback: if URL is a direct ipfs:// link, use it
-        if asset_url.startswith("ipfs://"):
-            cid = asset_url.replace("ipfs://", "")
-            print(f"[ARC19] Direct IPFS URL for ASA {asa_id}: {cid}")
-            return f"{IPFS_GATEWAY}{cid}"
+        if not metadata_cid:
+            print(f"[ARC19] Could not resolve metadata CID for ASA {asa_id}")
+            return None
 
-        print(f"[ARC19] Could not resolve image for ASA {asa_id}, using fallback")
-        return None
+        print(f"[ARC19] Metadata CID for ASA {asa_id}: {metadata_cid}")
+
+        # Step 3: Fetch metadata JSON → extract image field
+        metadata_url = f"{IPFS_GATEWAY}{metadata_cid}"
+        req2 = urllib.request.Request(metadata_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req2, timeout=10) as r:
+            metadata = json.loads(r.read())
+
+        image_field = metadata.get("image", "")
+        if not image_field:
+            print(f"[ARC19] No image field in metadata for ASA {asa_id}")
+            return None
+
+        # image field is ipfs://QmXXX — extract just the CID
+        image_cid = image_field.replace("ipfs://", "")
+        image_url = f"{IPFS_GATEWAY}{image_cid}"
+        print(f"[ARC19] Image URL for ASA {asa_id}: {image_url}")
+        return image_url
 
     except Exception as e:
         print(f"[ARC19] Live fetch failed for ASA {asa_id}: {e}")
