@@ -2503,30 +2503,29 @@ async def payout_all(state: EncounterState, payouts: dict[int, int], channel: di
     db = get_supabase()
     failed_lines = []
 
-    for uid, amount in payouts.items():
+    async def _pay_one(uid, amount):
         if amount <= 0:
-            continue
+            return
         try:
             wallet_row = db.table("linked_wallets").select("wallet_address").eq("user_id", str(uid)).execute()
             if not wallet_row.data:
-                # No wallet linked — hold as pending
                 _add_pending(db, str(uid), amount)
                 failed_lines.append(f"<@{uid}> — wallet not linked, GOO held ({amount:,})")
-                continue
-
+                return
             wallet = wallet_row.data[0]["wallet_address"]
             if not has_opted_in(wallet):
                 _add_pending(db, str(uid), amount)
                 failed_lines.append(f"<@{uid}> — not opted in to $GOO, GOO held ({amount:,})")
-                continue
-
+                return
             tx_id = await asyncio.to_thread(send_goo, wallet, amount)
             print(f"[PAYOUT] {amount} GOO → {uid} ({wallet[:8]}...) TxID: {tx_id}")
-
         except Exception as e:
             print(f"[ERROR] payout for {uid}: {e}")
             _add_pending(db, str(uid), amount)
             failed_lines.append(f"<@{uid}> — send failed, GOO held ({amount:,})")
+
+    # Fire all payouts in parallel
+    await asyncio.gather(*[_pay_one(uid, amount) for uid, amount in payouts.items()])
 
     if failed_lines:
         try:
@@ -2552,12 +2551,20 @@ def _add_pending(db, user_id: str, amount: int):
 # ─────────────────────────────────────────────
 
 def should_schedule_boss(db) -> bool:
-    """True if no boss has fired in the last 30 days and random 1-in-60 rolls hit."""
+    """True if no boss in last 30 days, bot has been running 14+ days, and random 1-in-60 rolls hit."""
     try:
         thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         recent = db.table("encounters").select("id").eq("is_boss", True).gte("started_at", thirty_days_ago).execute()
         if recent.data:
             return False  # Boss already happened this month
+
+        # Don't allow boss until at least 14 days of encounters have run
+        fourteen_days_ago = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        early = db.table("encounters").select("id").lt("started_at", fourteen_days_ago).execute()
+        if not early.data:
+            print("[BOSS] Too early — waiting for 14 days of encounters before first boss")
+            return False
+
         # Random chance — roughly 1-in-60 encounters (30 days × 2/day)
         return random.randint(1, 60) == 1
     except Exception as e:
