@@ -60,7 +60,7 @@ def get_supabase() -> Client:
 # ─────────────────────────────────────────────
 
 def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> str:
-    from algosdk import mnemonic, transaction
+    from algosdk import mnemonic, transaction, account
     from algosdk.v2client import algod
 
     client = algod.AlgodClient(
@@ -69,7 +69,7 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
     )
     mn = os.environ["BOT_MNEMONIC"]
     private_key = mnemonic.to_private_key(mn)
-    bot_address = mnemonic.to_public_key(mn)
+    bot_address = account.address_from_private_key(private_key)
     asset_id = int(os.environ["GOO_ASSET_ID"])
 
     params = client.suggested_params()
@@ -95,7 +95,9 @@ def has_opted_in(wallet_address: str) -> bool:
         )
         asset_id = int(os.environ["GOO_ASSET_ID"])
         info = client.account_info(wallet_address)
-        return any(a["asset-id"] == asset_id for a in info.get("assets", []))
+        assets = info.get("assets", [])
+        print(f"[WALLET] opt-in check for {wallet_address[:8]}... assets: {[a['asset-id'] for a in assets]}")
+        return any(a["asset-id"] == asset_id for a in assets)
     except Exception as e:
         print(f"[WALLET] opt-in check failed: {e}")
         return False
@@ -2492,26 +2494,37 @@ class EncountersCog(commands.Cog):
     async def _close_encounter(self, channel: discord.TextChannel):
         state = self.active_encounter
         if not state:
+            print("[CLOSE] No active encounter, skipping.")
             return
 
+        print(f"[CLOSE] Closing encounter for {state.monstr['name']} — {len(state.damage_dealt)} attackers")
         payouts = state.calculate_payouts()
+        print(f"[CLOSE] Payouts calculated: {payouts}")
 
         # Log to DB + update weekly stats
         try:
+            print("[CLOSE] Writing to DB...")
             await asyncio.to_thread(log_encounter_to_db, state, payouts)
+            print("[CLOSE] DB write OK")
             await asyncio.to_thread(update_weekly_stats, state)
+            print("[CLOSE] Weekly stats OK")
         except Exception as e:
             print(f"[ERROR] DB write on close: {e}")
 
         # Post results first, then pay out
+        print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
         await channel.send(embed=results_embed)
+        print("[CLOSE] Results embed sent")
 
         # Auto payout on-chain
+        print("[CLOSE] Starting payout_all...")
         await payout_all(state, payouts, channel)
+        print("[CLOSE] payout_all complete")
 
         self.active_encounter = None
         self.encounter_message = None
+        print("[CLOSE] Encounter fully closed")
 
     # ── Embeds ─────────────────────────────────
 
