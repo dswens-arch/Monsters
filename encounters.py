@@ -94,12 +94,15 @@ def has_opted_in(wallet_address: str) -> bool:
             algod_address=os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud"),
         )
         asset_id = int(os.environ["GOO_ASSET_ID"])
-        info = client.account_info(wallet_address)
-        assets = info.get("assets", [])
-        print(f"[WALLET] opt-in check for {wallet_address[:8]}... assets: {[a['asset-id'] for a in assets]}")
-        return any(a["asset-id"] == asset_id for a in assets)
+        # Targeted lookup — only fetches this one asset, not entire wallet
+        info = client.account_asset_info(wallet_address, asset_id)
+        print(f"[WALLET] opt-in confirmed for {wallet_address[:8]}...")
+        return True
     except Exception as e:
-        print(f"[WALLET] opt-in check failed: {e}")
+        if "404" in str(e) or "does not exist" in str(e).lower():
+            print(f"[WALLET] {wallet_address[:8]}... not opted in to GOO")
+        else:
+            print(f"[WALLET] opt-in check failed: {e}")
         return False
 
 
@@ -2247,7 +2250,10 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
                     "User-Agent": "Mozilla/5.0 (compatible; MONSTRSBot/1.0)",
                 })
                 with urllib.request.urlopen(req3, timeout=15) as r:
-                    image_bytes = r.read()
+                    image_bytes = r.read(5_000_000)  # cap at 5MB
+                if len(image_bytes) >= 5_000_000:
+                    print(f"[ARC19] Image too large (>5MB) from {gw}, skipping")
+                    continue
                 print(f"[ARC19] Image fetched ({len(image_bytes)} bytes) via {gw}")
                 return image_bytes
             except Exception as e:
@@ -2273,14 +2279,21 @@ async def pick_random_monstr(boss: bool = False) -> dict:
     name, _ = MONSTR_ASSETS[asa_id]
     base_hp = random.randint(800, 1500)
 
-    # Fetch live image bytes — fallback to stored URL if fetch fails
-    image_bytes = await fetch_live_image_url(asa_id)
+    # Fetch live image bytes with timeout guard
+    try:
+        image_bytes = await asyncio.wait_for(fetch_live_image_url(asa_id), timeout=20)
+    except asyncio.TimeoutError:
+        print(f"[ARC19] Image fetch timed out for ASA {asa_id}, spawning without image")
+        image_bytes = None
+    except Exception as e:
+        print(f"[ARC19] Image fetch error for ASA {asa_id}: {e}")
+        image_bytes = None
 
     return {
         "asa_id":       asa_id,
         "name":         name,
-        "image_bytes":  image_bytes,  # raw bytes or None
-        "image_url":    get_fallback_image_url(asa_id),  # fallback URL
+        "image_bytes":  image_bytes,
+        "image_url":    get_fallback_image_url(asa_id),
         "max_hp":       base_hp * 3 if boss else base_hp,
         "is_boss":      boss,
     }
@@ -2315,6 +2328,8 @@ class EncounterState:
         self.first_striker: int | None = None
         self.kill_shotter:  int | None = None
         self.damage_dealt:  dict[int, int] = {}
+        self.attack_counts: dict[int, int] = {}
+        self.crit_counts:   dict[int, int] = {}
         self.tag_pairs:     dict[int, int] = {}
         self.attackers_ordered: list[int] = []
         self.crit_count:    int = 0
@@ -2342,10 +2357,12 @@ class EncounterState:
             self.tag_pairs[user_id] = tagged_id
 
         self.damage_dealt[user_id] += damage
+        self.attack_counts[user_id] = self.attack_counts.get(user_id, 0) + 1
         self.hp = max(0, self.hp - damage)
 
         if is_crit:
             self.crit_count += 1
+            self.crit_counts[user_id] = self.crit_counts.get(user_id, 0) + 1
             events.append("crit")
 
         if self.hp <= 0 and self.alive:
@@ -2540,6 +2557,140 @@ def should_schedule_boss(db) -> bool:
 
 
 
+
+# ─────────────────────────────────────────────
+# MILESTONE CONFIG
+# ─────────────────────────────────────────────
+
+STREAK_MILESTONES = {
+    3:  500,
+    7:  1500,
+    14: 4000,
+    30: 10000,
+    60: 25000,
+}
+
+KILL_MILESTONES = {
+    1:  250,
+    5:  1000,
+    10: 2500,
+    25: 6000,
+    50: 15000,
+}
+
+ENCOUNTER_BONUSES = {
+    "most_damage":  250,
+    "most_attacks": 250,
+    "crit":         100,  # per crit
+}
+
+
+# ─────────────────────────────────────────────
+# MILESTONE + STATS DB HELPERS
+# ─────────────────────────────────────────────
+
+def get_or_create_player_stats(db, user_id: str) -> dict:
+    row = db.table("player_stats").select("*").eq("user_id", user_id).execute()
+    if row.data:
+        return row.data[0]
+    db.table("player_stats").insert({
+        "user_id":            user_id,
+        "total_encounters":   0,
+        "total_damage":       0,
+        "total_kill_shots":   0,
+        "total_goo_earned":   0,
+        "total_crits":        0,
+        "total_attacks":      0,
+        "current_streak":     0,
+        "longest_streak":     0,
+        "last_encounter_date": None,
+    }).execute()
+    return get_or_create_player_stats(db, user_id)
+
+
+def update_player_stats(db, user_id: str, dmg: int, attacks: int, crits: int,
+                        got_kill: bool, goo: int) -> dict:
+    """Update all-time stats and streak. Returns updated row."""
+    stats = get_or_create_player_stats(db, user_id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    last = stats.get("last_encounter_date")
+
+    # Streak logic
+    if last == today:
+        new_streak = stats["current_streak"]  # already attended today
+    elif last == (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d"):
+        new_streak = stats["current_streak"] + 1  # consecutive day
+    else:
+        new_streak = 1  # streak broken or first time
+
+    longest = max(stats["longest_streak"], new_streak)
+
+    db.table("player_stats").update({
+        "total_encounters":    stats["total_encounters"] + 1,
+        "total_damage":        stats["total_damage"] + dmg,
+        "total_kill_shots":    stats["total_kill_shots"] + (1 if got_kill else 0),
+        "total_goo_earned":    stats["total_goo_earned"] + goo,
+        "total_crits":         stats["total_crits"] + crits,
+        "total_attacks":       stats["total_attacks"] + attacks,
+        "current_streak":      new_streak,
+        "longest_streak":      longest,
+        "last_encounter_date": today,
+    }).eq("user_id", user_id).execute()
+
+    return {**stats, "current_streak": new_streak, "total_kill_shots": stats["total_kill_shots"] + (1 if got_kill else 0)}
+
+
+def check_and_award_milestones(db, user_id: str, updated_stats: dict) -> list[tuple[str, int]]:
+    """
+    Check if player just crossed any milestone thresholds.
+    Returns list of (description, goo_amount) for each newly unlocked milestone.
+    """
+    awarded = []
+
+    # Fetch already-awarded milestones
+    existing = db.table("awarded_milestones").select("milestone_key").eq("user_id", user_id).execute()
+    done = {r["milestone_key"] for r in existing.data}
+
+    streak = updated_stats["current_streak"]
+    kills  = updated_stats["total_kill_shots"]
+
+    for days, goo in STREAK_MILESTONES.items():
+        key = f"streak_{days}"
+        if key not in done and streak >= days:
+            db.table("awarded_milestones").insert({"user_id": user_id, "milestone_key": key}).execute()
+            db.table("pending_goo").upsert({"user_id": user_id, "amount": goo}, on_conflict="user_id").execute()
+            awarded.append((f"🔥 **{days}-Day Streak!**", goo))
+
+    for k, goo in KILL_MILESTONES.items():
+        key = f"kills_{k}"
+        if key not in done and kills >= k:
+            db.table("awarded_milestones").insert({"user_id": user_id, "milestone_key": key}).execute()
+            db.table("pending_goo").upsert({"user_id": user_id, "amount": goo}, on_conflict="user_id").execute()
+            awarded.append((f"💀 **{k} Kill Shot{'s' if k > 1 else ''}!**", goo))
+
+    return awarded
+
+
+async def announce_milestones(bot, channel, user_id: int, milestones: list[tuple[str, int]]):
+    """DM the player and announce publicly for each milestone."""
+    for desc, goo in milestones:
+        # Public announcement
+        try:
+            await channel.send(f"🏆 <@{user_id}> just unlocked {desc} — **{goo:,} $GOO** bonus incoming!")
+        except Exception as e:
+            print(f"[MILESTONE] Public announce failed: {e}")
+
+        # DM the player
+        try:
+            user = await bot.fetch_user(user_id)
+            await user.send(
+                f"🎉 **Milestone Unlocked!**\n\n"
+                f"{desc}\n"
+                f"**+{goo:,} $GOO** has been added to your balance and will be sent on-chain automatically."
+            )
+        except Exception as e:
+            print(f"[MILESTONE] DM failed for {user_id}: {e}")
+
 # ─────────────────────────────────────────────
 # BUTTONS + MODAL
 # ─────────────────────────────────────────────
@@ -2629,10 +2780,12 @@ class EncountersCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.channel_id = int(os.environ["DISCORD_ENCOUNTERS_CHANNEL_ID"])
+        self.encounter_role_id = int(os.environ.get("DISCORD_ENCOUNTER_ROLE_ID", "0"))
         self.active_encounter: EncounterState | None = None
         self.encounter_message: discord.Message | None = None
         self._next_encounters: dict = {}
         self._pending_boss: bool = False
+        self._attack_cooldowns: dict[int, float] = {}  # user_id → last attack timestamp
         self.encounter_scheduler.start()
 
     def cog_unload(self):
@@ -2725,23 +2878,32 @@ class EncountersCog(commands.Cog):
 
         embed = self._build_encounter_embed(self.active_encounter)
         view = self._build_attack_view()
-        prefix = "👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else "⚠️ **A MONSTR has appeared!** Attack now to earn $GOO!"
+        role_ping = f"<@&{self.encounter_role_id}> " if self.encounter_role_id else ""
+        prefix = f"{role_ping}👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else f"{role_ping}⚠️ **A MONSTR has appeared!** Attack now to earn $GOO!"
 
         image_bytes = self.active_encounter.monstr.get("image_bytes")
+        file = None
         if image_bytes:
-            import io
-            from PIL import Image
-            # Resize to max 512px to keep under Discord's embed size limits
-            img = Image.open(io.BytesIO(image_bytes))
-            img.thumbnail((512, 512), Image.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG", optimize=True)
-            buf.seek(0)
-            file = discord.File(buf, filename="monstr.png")
-            embed.set_image(url="attachment://monstr.png")
+            try:
+                import io
+                from PIL import Image
+                img = Image.open(io.BytesIO(image_bytes))
+                img.thumbnail((400, 400), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=75, optimize=True)
+                buf.seek(0)
+                # Only attach if under 2MB
+                if buf.getbuffer().nbytes < 2_000_000:
+                    file = discord.File(buf, filename="monstr.jpg")
+                    embed.set_image(url="attachment://monstr.jpg")
+                else:
+                    print(f"[IMAGE] Still too large after resize, skipping attachment")
+            except Exception as e:
+                print(f"[IMAGE] Resize failed: {e}")
+
+        if file:
             self.encounter_message = await channel.send(prefix, embed=embed, view=view, file=file)
         else:
-            # Fallback to URL if bytes unavailable
             self.encounter_message = await channel.send(prefix, embed=embed, view=view)
 
         await asyncio.sleep(ENCOUNTER_DURATION)
@@ -2757,7 +2919,24 @@ class EncountersCog(commands.Cog):
         payouts = state.calculate_payouts()
         print(f"[CLOSE] Payouts calculated: {payouts}")
 
-        # Log to DB + update weekly stats
+        # ── In-encounter bonuses ──
+        if state.damage_dealt:
+            top_damage_uid = max(state.damage_dealt, key=state.damage_dealt.get)
+            top_attacks_uid = max(state.attack_counts, key=state.attack_counts.get) if state.attack_counts else None
+
+            for uid in state.damage_dealt:
+                bonus = 0
+                if uid == top_damage_uid:
+                    bonus += ENCOUNTER_BONUSES["most_damage"]
+                if uid == top_attacks_uid:
+                    bonus += ENCOUNTER_BONUSES["most_attacks"]
+                crit_bonus = state.crit_counts.get(uid, 0) * ENCOUNTER_BONUSES["crit"]
+                bonus += crit_bonus
+                if bonus > 0:
+                    payouts[uid] = payouts.get(uid, 0) + bonus
+                    print(f"[BONUS] {uid} gets +{bonus} GOO (damage:{uid==top_damage_uid} attacks:{uid==top_attacks_uid} crits:{state.crit_counts.get(uid,0)})")
+
+        # ── Log to DB + update weekly stats ──
         try:
             print("[CLOSE] Writing to DB...")
             await asyncio.to_thread(log_encounter_to_db, state, payouts)
@@ -2767,19 +2946,40 @@ class EncountersCog(commands.Cog):
         except Exception as e:
             print(f"[ERROR] DB write on close: {e}")
 
-        # Post results first, then pay out
+        # ── Update all-time stats + check milestones ──
+        milestone_tasks = []
+        try:
+            db = get_supabase()
+            for uid, dmg in state.damage_dealt.items():
+                got_kill = uid == state.kill_shotter
+                attacks = state.attack_counts.get(uid, 0)
+                crits = state.crit_counts.get(uid, 0)
+                goo = payouts.get(uid, 0)
+                updated = update_player_stats(db, str(uid), dmg, attacks, crits, got_kill, goo)
+                milestones = check_and_award_milestones(db, str(uid), updated)
+                if milestones:
+                    milestone_tasks.append((uid, milestones))
+        except Exception as e:
+            print(f"[ERROR] Stats/milestone update: {e}")
+
+        # ── Post results ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
         await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
-        # Auto payout on-chain
+        # ── Announce milestones ──
+        for uid, milestones in milestone_tasks:
+            await announce_milestones(self.bot, channel, uid, milestones)
+
+        # ── Auto payout on-chain ──
         print("[CLOSE] Starting payout_all...")
         await payout_all(state, payouts, channel)
         print("[CLOSE] payout_all complete")
 
         self.active_encounter = None
         self.encounter_message = None
+        self._attack_cooldowns.clear()
         print("[CLOSE] Encounter fully closed")
 
     # ── Embeds ─────────────────────────────────
@@ -2861,6 +3061,20 @@ class EncountersCog(commands.Cog):
             return
 
         user_id = interaction.user.id
+
+        # 15 second cooldown check
+        import time
+        now = time.time()
+        last = self._attack_cooldowns.get(user_id, 0)
+        remaining = 15 - (now - last)
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"⏳ You can attack again in **{remaining:.0f}s**!",
+                ephemeral=True
+            )
+            return
+        self._attack_cooldowns[user_id] = now
+
         result = state.register_attack(user_id, tagged_id)
 
         if "error" in result:
@@ -2918,54 +3132,54 @@ class EncountersCog(commands.Cog):
 
     # ── /leaderboard ───────────────────────────
 
-    @discord.app_commands.command(name="leaderboard", description="Weekly MONSTR Encounters leaderboard")
-    async def leaderboard(self, interaction: discord.Interaction):
+    @discord.app_commands.command(name="leaderboard", description="MONSTR Encounters leaderboard")
+    @discord.app_commands.describe(board="Weekly or all-time leaderboard")
+    @discord.app_commands.choices(board=[
+        discord.app_commands.Choice(name="Weekly", value="weekly"),
+        discord.app_commands.Choice(name="All-Time", value="alltime"),
+    ])
+    async def leaderboard(self, interaction: discord.Interaction, board: str = "weekly"):
         await interaction.response.defer()
         try:
             db = get_supabase()
-            week = _week_start()
+            medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
 
-            rows = db.table("weekly_stats").select("*").eq("week_start", week).execute().data
-            if not rows:
-                await interaction.followup.send("No encounters recorded this week yet. Check back after the first battle!", ephemeral=True)
-                return
-
-            top_dmg  = sorted(rows, key=lambda r: r["total_damage"],      reverse=True)[:3]
-            top_kill = sorted(rows, key=lambda r: r["kill_shots"],         reverse=True)[:3]
-            top_part = sorted(rows, key=lambda r: r["encounters_joined"],  reverse=True)[:3]
-
-            def fmt(ranked):
-                medals = ["🥇", "🥈", "🥉"]
+            def fmt(rows, key, label):
+                ranked = sorted(rows, key=lambda r: r.get(key, 0), reverse=True)[:5]
+                if not ranked:
+                    return "No data yet"
                 return "\n".join(
-                    f"{medals[i]} <@{r['user_id']}> — **{list(r.values())[2 + list(r.keys()).index(next(k for k in r if k not in ['user_id', 'week_start', 'id']))]}"
+                    f"{medals[i]} <@{r['user_id']}> — **{r.get(key,0):,} {label}**"
                     for i, r in enumerate(ranked)
-                ) if ranked else "No data"
+                )
 
-            def fmt_damage(ranked):
-                medals = ["🥇","🥈","🥉"]
-                return "\n".join(f"{medals[i]} <@{r['user_id']}> — **{r['total_damage']:,} dmg**" for i, r in enumerate(ranked))
-
-            def fmt_kills(ranked):
-                medals = ["🥇","🥈","🥉"]
-                return "\n".join(f"{medals[i]} <@{r['user_id']}> — **{r['kill_shots']} kill shots**" for i, r in enumerate(ranked))
-
-            def fmt_part(ranked):
-                medals = ["🥇","🥈","🥉"]
-                return "\n".join(f"{medals[i]} <@{r['user_id']}> — **{r['encounters_joined']} encounters**" for i, r in enumerate(ranked))
-
-            embed = discord.Embed(
-                title=f"📊 Weekly Leaderboard — w/c {week}",
-                color=0x9b59b6
-            )
-            embed.add_field(name="⚔️ Top Damage", value=fmt_damage(top_dmg), inline=False)
-            embed.add_field(name="💀 Kill Shots", value=fmt_kills(top_kill), inline=False)
-            embed.add_field(name="🎮 Participation", value=fmt_part(top_part), inline=False)
-            embed.set_footer(text="Resets every Monday. 14 encounters per week.")
+            if board == "weekly":
+                week = _week_start()
+                rows = db.table("weekly_stats").select("*").eq("week_start", week).execute().data
+                if not rows:
+                    await interaction.followup.send("No encounters recorded this week yet!", ephemeral=True)
+                    return
+                embed = discord.Embed(title=f"📊 Weekly Leaderboard — w/c {week}", color=0x9b59b6)
+                embed.add_field(name="⚔️ Top Damage", value=fmt(rows, "total_damage", "dmg"), inline=False)
+                embed.add_field(name="💀 Kill Shots", value=fmt(rows, "kill_shots", "kills"), inline=False)
+                embed.add_field(name="🎮 Participation", value=fmt(rows, "encounters_joined", "encounters"), inline=False)
+                embed.set_footer(text="Resets every Monday · 14 encounters per week")
+            else:
+                rows = db.table("player_stats").select("*").execute().data
+                if not rows:
+                    await interaction.followup.send("No all-time stats yet!", ephemeral=True)
+                    return
+                embed = discord.Embed(title="🏆 All-Time Leaderboard", color=0xf1c40f)
+                embed.add_field(name="⚔️ Total Damage", value=fmt(rows, "total_damage", "dmg"), inline=False)
+                embed.add_field(name="💀 Kill Shots", value=fmt(rows, "total_kill_shots", "kills"), inline=False)
+                embed.add_field(name="🧪 GOO Earned", value=fmt(rows, "total_goo_earned", "GOO"), inline=False)
+                embed.add_field(name="🔥 Longest Streak", value=fmt(rows, "longest_streak", "days"), inline=False)
+                embed.set_footer(text="All-time records across all encounters")
 
             await interaction.followup.send(embed=embed)
         except Exception as e:
             print(f"[ERROR] leaderboard: {e}")
-            await interaction.followup.send("Couldn't load the leaderboard right now.", ephemeral=True)
+            await interaction.followup.send("Couldn\'t load the leaderboard right now.", ephemeral=True)
 
     # ── TEST COMMANDS (remove before going live) ──
 
@@ -3027,11 +3241,25 @@ class WalletCog(commands.Cog):
             else:
                 pending_msg = ""
 
+            # Assign encounter role on first link
+            role_line = ""
+            try:
+                role_id = int(os.environ.get("DISCORD_ENCOUNTER_ROLE_ID", "0"))
+                if role_id and interaction.guild:
+                    role = interaction.guild.get_role(role_id)
+                    member = interaction.guild.get_member(interaction.user.id)
+                    if role and member and role not in member.roles:
+                        await member.add_roles(role, reason="Linked wallet to $GOO Warden")
+                        role_line = f"\n🎮 You've been given the <@&{role_id}> role — you'll be pinged for every encounter!"
+            except Exception as e:
+                print(f"[ROLE] Failed to assign role: {e}")
+
             if opted_in:
                 msg = (
                     f"✅ **Wallet linked!**\n\n"
                     f"👛 `{wallet[:8]}...{wallet[-4:]}`\n"
                     f"You're all set — $GOO rewards will be sent automatically after each encounter."
+                    + role_line
                     + pending_msg
                 )
             else:
@@ -3039,6 +3267,7 @@ class WalletCog(commands.Cog):
                     f"⚠️ **Wallet linked, but you need to opt in to $GOO first.**\n\n"
                     f"Open **Pera Wallet** → search ASA ID `{asset_id}` → **Add Asset**\n\n"
                     f"Your rewards will be held until you opt in."
+                    + role_line
                     + pending_msg
                 )
 
@@ -3047,6 +3276,45 @@ class WalletCog(commands.Cog):
         except Exception as e:
             print(f"[ERROR] link_wallet: {e}")
             await interaction.followup.send("Something went wrong. Try again.", ephemeral=True)
+
+    @discord.app_commands.command(name="stats", description="View your all-time MONSTR Encounters stats")
+    async def stats(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            db = get_supabase()
+            user_id = str(interaction.user.id)
+            s = get_or_create_player_stats(db, user_id)
+
+            # Next streak milestone
+            streak = s["current_streak"]
+            next_streak = next((d for d in sorted(STREAK_MILESTONES) if d > streak), None)
+            streak_line = (
+                f"{streak} days (next milestone: {next_streak} days → {STREAK_MILESTONES[next_streak]:,} GOO)"
+                if next_streak else f"{streak} days 🏆 Max milestone reached!"
+            )
+
+            # Next kill milestone
+            kills = s["total_kill_shots"]
+            next_kill = next((k for k in sorted(KILL_MILESTONES) if k > kills), None)
+            kill_line = (
+                f"{kills} (next milestone: {next_kill} kills → {KILL_MILESTONES[next_kill]:,} GOO)"
+                if next_kill else f"{kills} 🏆 Max milestone reached!"
+            )
+
+            embed = discord.Embed(title=f"📊 {interaction.user.display_name}'s Stats", color=0x9b59b6)
+            embed.add_field(name="🎮 Encounters", value=str(s["total_encounters"]), inline=True)
+            embed.add_field(name="⚔️ Total Attacks", value=str(s["total_attacks"]), inline=True)
+            embed.add_field(name="💥 Total Damage", value=f"{s['total_damage']:,}", inline=True)
+            embed.add_field(name="💀 Kill Shots", value=kill_line, inline=False)
+            embed.add_field(name="⚡ Critical Hits", value=str(s["total_crits"]), inline=True)
+            embed.add_field(name="🧪 GOO Earned", value=f"{s['total_goo_earned']:,}", inline=True)
+            embed.add_field(name="🔥 Streak", value=streak_line, inline=False)
+            embed.add_field(name="📈 Longest Streak", value=f"{s['longest_streak']} days", inline=True)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] stats: {e}")
+            await interaction.followup.send("Couldn't fetch your stats right now.", ephemeral=True)
 
     @discord.app_commands.command(name="balance", description="Check your $GOO status")
     async def balance(self, interaction: discord.Interaction):
