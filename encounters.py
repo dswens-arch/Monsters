@@ -2111,7 +2111,7 @@ MONSTR_ASSETS = {
     "3294939701": ("MONSTR #1998", "QmdbqE9Bc2YJca5Nbo5JPA9LaEwn4XcickCtX7zpY7BH6P"),
 }
 
-IPFS_GATEWAY = "https://ipfs.io/ipfs/"
+IPFS_GATEWAY = "https://cloudflare-ipfs.com/ipfs/"
 
 
 def decode_arc19_reserve(reserve_address: str) -> str | None:
@@ -2486,44 +2486,39 @@ def should_schedule_boss(db) -> bool:
 # BUTTONS + MODAL
 # ─────────────────────────────────────────────
 
-class TeammateModal(discord.ui.Modal, title="Tag a Teammate"):
-    teammate = discord.ui.TextInput(
-        label="Teammate's username (without @)",
-        placeholder="e.g. CryptoKing",
-        min_length=2,
-        max_length=32,
-    )
-
+class TeammateSelectView(discord.ui.View):
+    """Ephemeral view with a Discord user select menu — shows autocomplete suggestions."""
     def __init__(self, cog):
-        super().__init__()
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.add_item(TeammateSelect(cog))
+
+
+class TeammateSelect(discord.ui.UserSelect):
+    def __init__(self, cog):
+        super().__init__(
+            placeholder="Search for a teammate...",
+            min_values=1,
+            max_values=1,
+        )
         self.cog = cog
 
-    async def on_submit(self, interaction: discord.Interaction):
-        state = self.cog.active_encounter
-        if not state:
-            await interaction.response.send_message("The encounter already ended!", ephemeral=True)
-            return
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
 
-        # Resolve username to member
-        username = self.teammate.value.strip().lstrip("@")
-        guild = interaction.guild
-        member = discord.utils.find(
-            lambda m: m.name.lower() == username.lower() or m.display_name.lower() == username.lower(),
-            guild.members
-        )
-
-        if not member:
-            await interaction.response.send_message(
-                f"❌ Couldn't find **{username}** in this server. Check the spelling and try again.",
-                ephemeral=True
-            )
-            return
-
-        if member.id == interaction.user.id:
+        if selected.id == interaction.user.id:
             await interaction.response.send_message("You can't tag yourself!", ephemeral=True)
             return
 
-        await self.cog._process_attack(interaction, tagged_id=member.id, tagged_name=member.display_name)
+        if not self.cog.active_encounter:
+            await interaction.response.send_message("The encounter already ended!", ephemeral=True)
+            return
+
+        await self.cog._process_attack(
+            interaction,
+            tagged_id=selected.id,
+            tagged_name=selected.display_name
+        )
 
 
 class AttackButton(discord.ui.Button):
@@ -2561,7 +2556,11 @@ class TagTeammateButton(discord.ui.Button):
                 ephemeral=True
             )
             return
-        await interaction.response.send_modal(TeammateModal(cog))
+        await interaction.response.send_message(
+            "👇 Pick your teammate from the list below:",
+            view=TeammateSelectView(cog),
+            ephemeral=True
+        )
 
 
 # ─────────────────────────────────────────────
