@@ -3,3 +3,4 @@ supabase==1.2.0
 httpx==0.24.1
 python-dotenv==1.0.0
 py-algorand-sdk==2.5.0
+Pillow==10.3.0
