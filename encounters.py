@@ -2195,18 +2195,41 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
 
         print(f"[ARC19] Metadata CID for ASA {asa_id}: {metadata_cid}")
 
-        # Step 3: Fetch metadata JSON → extract image field
-        metadata_url = f"{IPFS_GATEWAY}{metadata_cid}"
-        req2 = urllib.request.Request(metadata_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req2, timeout=10) as r:
-            metadata = json.loads(r.read())
+        # Step 3: Fetch metadata JSON from IPFS — try multiple gateways
+        METADATA_GATEWAYS = [
+            "https://ipfs.algonode.xyz/ipfs/",
+            "https://ipfs.io/ipfs/",
+            "https://gateway.pinata.cloud/ipfs/",
+            "https://cloudflare-ipfs.com/ipfs/",
+            "https://dweb.link/ipfs/",
+        ]
+
+        metadata = None
+        for gw in METADATA_GATEWAYS:
+            try:
+                metadata_url = f"{gw}{metadata_cid}"
+                req2 = urllib.request.Request(metadata_url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; MONSTRSBot/1.0)",
+                    "Accept": "application/json",
+                })
+                with urllib.request.urlopen(req2, timeout=10) as r:
+                    metadata = json.loads(r.read())
+                print(f"[ARC19] Metadata fetched via {gw}")
+                break
+            except Exception as e:
+                print(f"[ARC19] Gateway {gw} failed: {e}")
+                continue
+
+        if not metadata:
+            print(f"[ARC19] All metadata gateways failed for ASA {asa_id}")
+            return None
 
         image_field = metadata.get("image", "")
         if not image_field:
             print(f"[ARC19] No image field in metadata for ASA {asa_id}")
             return None
 
-        # image field is ipfs://QmXXX — extract just the CID
+        # image field is ipfs://QmXXX — build final image URL using first working gateway
         image_cid = image_field.replace("ipfs://", "")
         image_url = f"{IPFS_GATEWAY}{image_cid}"
         print(f"[ARC19] Image URL for ASA {asa_id}: {image_url}")
