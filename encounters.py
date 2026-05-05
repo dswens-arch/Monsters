@@ -2382,6 +2382,89 @@ def should_schedule_boss(db) -> bool:
         return False
 
 
+
+# ─────────────────────────────────────────────
+# BUTTONS + MODAL
+# ─────────────────────────────────────────────
+
+class TeammateModal(discord.ui.Modal, title="Tag a Teammate"):
+    teammate = discord.ui.TextInput(
+        label="Teammate's username (without @)",
+        placeholder="e.g. CryptoKing",
+        min_length=2,
+        max_length=32,
+    )
+
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = self.cog.active_encounter
+        if not state:
+            await interaction.response.send_message("The encounter already ended!", ephemeral=True)
+            return
+
+        # Resolve username to member
+        username = self.teammate.value.strip().lstrip("@")
+        guild = interaction.guild
+        member = discord.utils.find(
+            lambda m: m.name.lower() == username.lower() or m.display_name.lower() == username.lower(),
+            guild.members
+        )
+
+        if not member:
+            await interaction.response.send_message(
+                f"❌ Couldn't find **{username}** in this server. Check the spelling and try again.",
+                ephemeral=True
+            )
+            return
+
+        if member.id == interaction.user.id:
+            await interaction.response.send_message("You can't tag yourself!", ephemeral=True)
+            return
+
+        await self.cog._process_attack(interaction, tagged_id=member.id, tagged_name=member.display_name)
+
+
+class AttackButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="⚔️ Attack",
+            style=discord.ButtonStyle.danger,
+            custom_id="attack_solo",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.cogs.get("EncountersCog")
+        if not cog or not cog.active_encounter:
+            await interaction.response.send_message(
+                "⚠️ No active encounter right now!",
+                ephemeral=True
+            )
+            return
+        await cog._process_attack(interaction, tagged_id=None, tagged_name=None)
+
+
+class TagTeammateButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="🤝 Tag a Friend",
+            style=discord.ButtonStyle.primary,
+            custom_id="attack_team",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.cogs.get("EncountersCog")
+        if not cog or not cog.active_encounter:
+            await interaction.response.send_message(
+                "⚠️ No active encounter right now!",
+                ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(TeammateModal(cog))
+
+
 # ─────────────────────────────────────────────
 # DISCORD COG
 # ─────────────────────────────────────────────
@@ -2485,8 +2568,9 @@ class EncountersCog(commands.Cog):
         self.active_encounter = EncounterState(monstr)
 
         embed = self._build_encounter_embed(self.active_encounter)
+        view = self._build_attack_view()
         prefix = "👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else "⚠️ **A MONSTR has appeared!** Attack now to earn $GOO!"
-        self.encounter_message = await channel.send(prefix, embed=embed)
+        self.encounter_message = await channel.send(prefix, embed=embed, view=view)
 
         await asyncio.sleep(ENCOUNTER_DURATION)
         await self._close_encounter(channel)
@@ -2588,27 +2672,17 @@ class EncountersCog(commands.Cog):
         pct = int((hp / max_hp) * 100)
         return f"`{bar}` {pct}% HP"
 
-    # ── /attack ────────────────────────────────
+    # ── ATTACK PROCESSOR ───────────────────────
 
-    @discord.app_commands.command(name="attack", description="Attack the active MONSTR!")
-    @discord.app_commands.describe(teammate="Tag a friend for a team bonus")
-    async def attack(self, interaction: discord.Interaction, teammate: discord.Member = None):
-        if not self.active_encounter:
-            await interaction.response.send_message(
-                "⚠️ No MONSTR is active right now. A warning will ping 5 minutes before the next one!",
-                ephemeral=True
-            )
-            return
-
+    async def _process_attack(self, interaction: discord.Interaction, tagged_id: int | None, tagged_name: str | None):
         state = self.active_encounter
-        user_id = interaction.user.id
-        tagged_id = teammate.id if teammate else None
-
-        if tagged_id == user_id:
-            await interaction.response.send_message("You can't tag yourself!", ephemeral=True)
+        if not state:
+            await interaction.response.send_message("The encounter has already ended.", ephemeral=True)
             return
 
+        user_id = interaction.user.id
         result = state.register_attack(user_id, tagged_id)
+
         if "error" in result:
             await interaction.response.send_message("The encounter has already ended.", ephemeral=True)
             return
@@ -2616,6 +2690,7 @@ class EncountersCog(commands.Cog):
         events = result["events"]
         lines = []
 
+        # Ephemeral damage feedback
         if result["is_crit"]:
             lines.append(f"⚡ **CRITICAL HIT!** You dealt **{result['damage']} damage!**")
         else:
@@ -2623,22 +2698,43 @@ class EncountersCog(commands.Cog):
 
         lines.append(self._hp_bar(result["hp_remaining"], result["max_hp"]))
 
+        total_dmg = state.damage_dealt.get(user_id, 0)
+        lines.append(f"📊 Your total damage this encounter: **{total_dmg}**")
+
         if "first_strike" in events:
             lines.append("🥊 **First Strike!** Bonus GOO incoming.")
         if "kill_shot" in events:
             lines.append("💀 **KILL SHOT!** Big bonus incoming.")
-        if tagged_id:
-            lines.append(f"🤝 Teamed up with <@{tagged_id}>!")
-        if result["hp_remaining"] <= 0:
-            lines.append(f"\n☠️ **{state.monstr['name']} has been defeated!** Paying out now...")
+        if tagged_name:
+            lines.append(f"🤝 Teamed up with **{tagged_name}**! You both get a bonus.")
 
-        await interaction.response.send_message("\n".join(lines))
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+        # Public announcements for hype moments
+        channel = interaction.channel
+        if "first_strike" in events:
+            await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood!")
+        if result["is_crit"] and "first_strike" not in events:
+            await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
+        if "kill_shot" in events:
+            await channel.send(f"💀 **KILL SHOT!** <@{user_id}> finished off {state.monstr['name']}! Paying out now...")
+
+        # Update main embed HP bar
         if state.alive and self.encounter_message:
             try:
-                await self.encounter_message.edit(embed=self._build_encounter_embed(state))
+                updated_embed = self._build_encounter_embed(state)
+                view = self._build_attack_view()
+                await self.encounter_message.edit(embed=updated_embed, view=view)
             except Exception as e:
                 print(f"[WARN] embed update: {e}")
+
+    # ── BUTTONS ────────────────────────────────
+
+    def _build_attack_view(self) -> discord.ui.View:
+        view = discord.ui.View(timeout=None)
+        view.add_item(AttackButton())
+        view.add_item(TagTeammateButton())
+        return view
 
     # ── /leaderboard ───────────────────────────
 
