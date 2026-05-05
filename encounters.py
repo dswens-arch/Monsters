@@ -2113,17 +2113,93 @@ MONSTR_ASSETS = {
 
 IPFS_GATEWAY = "https://ipfs.io/ipfs/"
 
-def get_monstr_image_url(ipfs_hash: str) -> str:
-    return f"{IPFS_GATEWAY}{ipfs_hash}"
 
-def pick_random_monstr(boss: bool = False) -> dict:
+def decode_arc19_reserve(reserve_address: str) -> str | None:
+    """
+    ARC19 encodes the IPFS CID in the asset reserve address.
+    Decode: base32 the reserve address (strip checksum) → get CID bytes → base32 encode as CIDv1.
+
+    The reserve field is an Algorand address. The first 32 bytes (after
+    base32 decode, minus the 4-byte checksum) are the raw multihash bytes
+    of the IPFS CID. Re-encode with base32 (uppercase, no padding) to get
+    the CIDv1 string.
+    """
+    try:
+        import base64
+        # Algorand addresses are base32-encoded 36 bytes (32 data + 4 checksum)
+        # Add padding if needed
+        padded = reserve_address + "=" * (-len(reserve_address) % 8)
+        decoded = base64.b32decode(padded)
+        # First 32 bytes are the CID multihash, drop the 4-byte checksum
+        cid_bytes = decoded[:32]
+        # ARC19 uses CIDv1 with sha2-256: prepend multihash header (0x12, 0x20)
+        multihash = bytes([0x12, 0x20]) + cid_bytes
+        # Base32 encode (uppercase, strip padding) → CIDv1 base32
+        cid = base64.b32encode(multihash).decode().rstrip("=").lower()
+        return cid
+    except Exception as e:
+        print(f"[ARC19] CID decode failed: {e}")
+        return None
+
+
+async def fetch_live_image_url(asa_id: str) -> str | None:
+    """
+    Fetch the current image URL for a MONSTR ASA from the Algorand indexer.
+    Uses the ARC19 reserve address decode to get the live IPFS CID.
+    Falls back to the stored hash in MONSTR_ASSETS if fetch fails.
+    """
+    import urllib.request
+    import json
+
+    indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+    url = f"{indexer_url}/v2/assets/{asa_id}"
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
+        })
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+
+        params = data.get("asset", {}).get("params", {})
+        reserve = params.get("reserve")
+
+        if reserve:
+            cid = decode_arc19_reserve(reserve)
+            if cid:
+                print(f"[ARC19] Live CID for ASA {asa_id}: {cid}")
+                return f"{IPFS_GATEWAY}{cid}"
+
+        print(f"[ARC19] No reserve field for ASA {asa_id}, using fallback")
+        return None
+
+    except Exception as e:
+        print(f"[ARC19] Live fetch failed for ASA {asa_id}: {e}")
+        return None
+
+
+def get_fallback_image_url(asa_id: str) -> str:
+    """Return stored IPFS URL from MONSTR_ASSETS dict as fallback."""
+    _, ipfs_hash = MONSTR_ASSETS.get(asa_id, ("Unknown", ""))
+    return f"{IPFS_GATEWAY}{ipfs_hash}" if ipfs_hash else ""
+
+
+async def pick_random_monstr(boss: bool = False) -> dict:
     asa_id = random.choice(list(MONSTR_ASSETS.keys()))
-    name, ipfs_hash = MONSTR_ASSETS[asa_id]
+    name, _ = MONSTR_ASSETS[asa_id]
     base_hp = random.randint(800, 1500)
+
+    # Always fetch live image — fallback to stored hash if indexer fails
+    image_url = await fetch_live_image_url(asa_id)
+    if not image_url:
+        image_url = get_fallback_image_url(asa_id)
+
     return {
         "asa_id": asa_id,
         "name": name,
-        "image_url": get_monstr_image_url(ipfs_hash),
+        "image_url": image_url,
         "max_hp": base_hp * 3 if boss else base_hp,
         "is_boss": boss,
     }
@@ -2564,7 +2640,7 @@ class EncountersCog(commands.Cog):
             print(f"[ERROR] Channel {self.channel_id} not found.")
             return
 
-        monstr = pick_random_monstr(boss=boss)
+        monstr = await pick_random_monstr(boss=boss)
         self.active_encounter = EncounterState(monstr)
 
         embed = self._build_encounter_embed(self.active_encounter)
