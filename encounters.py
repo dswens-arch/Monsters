@@ -2887,7 +2887,7 @@ class EncountersCog(commands.Cog):
             try:
                 import io
                 from PIL import Image
-                img = Image.open(io.BytesIO(image_bytes))
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                 img.thumbnail((400, 400), Image.LANCZOS)
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=75, optimize=True)
