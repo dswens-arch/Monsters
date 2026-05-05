@@ -2793,8 +2793,8 @@ class EncountersCog(commands.Cog):
             title=title,
             description=(
                 f"{hp_bar}\n\n"
-                f"**Use `/attack` to deal damage!**\n"
-                f"Tag a teammate with `/attack @friend` for a bonus.\n\n"
+                f"**Tap Attack to deal damage!**\n"
+                f"Tap Tag a Friend to bring a teammate for a bonus.\n\n"
                 f"🏆 **{goo_total:,} $GOO** up for grabs\n"
                 f"⏱️ **10 minutes** to take it down"
             ),
