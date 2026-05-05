@@ -2730,7 +2730,14 @@ class EncountersCog(commands.Cog):
         image_bytes = self.active_encounter.monstr.get("image_bytes")
         if image_bytes:
             import io
-            file = discord.File(io.BytesIO(image_bytes), filename="monstr.png")
+            from PIL import Image
+            # Resize to max 512px to keep under Discord's embed size limits
+            img = Image.open(io.BytesIO(image_bytes))
+            img.thumbnail((512, 512), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            buf.seek(0)
+            file = discord.File(buf, filename="monstr.png")
             embed.set_image(url="attachment://monstr.png")
             self.encounter_message = await channel.send(prefix, embed=embed, view=view, file=file)
         else:
