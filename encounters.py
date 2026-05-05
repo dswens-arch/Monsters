@@ -2111,7 +2111,7 @@ MONSTR_ASSETS = {
     "3294939701": ("MONSTR #1998", "QmdbqE9Bc2YJca5Nbo5JPA9LaEwn4XcickCtX7zpY7BH6P"),
 }
 
-IPFS_GATEWAY = "https://cloudflare-ipfs.com/ipfs/"
+IPFS_GATEWAY = "https://ipfs.algonode.xyz/ipfs/"
 
 
 def decode_arc19_reserve(reserve_address: str) -> str | None:
