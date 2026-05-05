@@ -2249,12 +2249,21 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
                 req3 = urllib.request.Request(image_url, headers={
                     "User-Agent": "Mozilla/5.0 (compatible; MONSTRSBot/1.0)",
                 })
-                with urllib.request.urlopen(req3, timeout=15) as r:
-                    image_bytes = r.read(5_000_000)  # cap at 5MB
-                if len(image_bytes) >= 5_000_000:
-                    print(f"[ARC19] Image too large (>5MB) from {gw}, skipping")
-                    continue
-                print(f"[ARC19] Image fetched ({len(image_bytes)} bytes) via {gw}")
+                # Stream in chunks — stop at 20MB, we'll resize it down
+                chunks = []
+                total = 0
+                with urllib.request.urlopen(req3, timeout=20) as r:
+                    while True:
+                        chunk = r.read(1_048_576)  # 1MB chunks
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= 20_000_000:
+                            print(f"[ARC19] Stopping download at 20MB from {gw}")
+                            break
+                image_bytes = b"".join(chunks)
+                print(f"[ARC19] Image fetched ({total // 1024}KB) via {gw}")
                 return image_bytes
             except Exception as e:
                 print(f"[ARC19] Image gateway {gw} failed: {e}")
@@ -2851,14 +2860,15 @@ class EncountersCog(commands.Cog):
         channel = self.bot.get_channel(self.channel_id)
         if not channel:
             return
+        role_ping = f"<@&{self.encounter_role_id}> " if self.encounter_role_id else ""
         if is_boss:
             await channel.send(
-                "🚨 **BOSS ENCOUNTER IN 5 MINUTES!**\n"
+                f"{role_ping}🚨 **BOSS ENCOUNTER IN 5 MINUTES!**\n"
                 "A powerful MONSTR is approaching. This is a rare event — 3x GOO on the line. Get ready! 👹"
             )
         else:
             await channel.send(
-                "⚠️ **A MONSTR is approaching — 5 minutes!** Get ready to attack! 👾"
+                f"{role_ping}⚠️ **A MONSTR is approaching — 5 minutes!** Get ready to attack! 👾"
             )
 
     # ── Encounter Runner ───────────────────────
@@ -2890,14 +2900,12 @@ class EncountersCog(commands.Cog):
                 img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                 img.thumbnail((400, 400), Image.LANCZOS)
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=75, optimize=True)
+                img.save(buf, format="JPEG", quality=70, optimize=True)
                 buf.seek(0)
-                # Only attach if under 2MB
-                if buf.getbuffer().nbytes < 2_000_000:
-                    file = discord.File(buf, filename="monstr.jpg")
-                    embed.set_image(url="attachment://monstr.jpg")
-                else:
-                    print(f"[IMAGE] Still too large after resize, skipping attachment")
+                size_kb = buf.getbuffer().nbytes // 1024
+                print(f"[IMAGE] Resized to {size_kb}KB")
+                file = discord.File(buf, filename="monstr.jpg")
+                embed.set_image(url="attachment://monstr.jpg")
             except Exception as e:
                 print(f"[IMAGE] Resize failed: {e}")
 
