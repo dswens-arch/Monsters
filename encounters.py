@@ -2117,25 +2117,36 @@ IPFS_GATEWAY = "https://ipfs.io/ipfs/"
 def decode_arc19_reserve(reserve_address: str) -> str | None:
     """
     ARC19 encodes the IPFS CID in the asset reserve address.
-    Decode: base32 the reserve address (strip checksum) → get CID bytes → base32 encode as CIDv1.
-
-    The reserve field is an Algorand address. The first 32 bytes (after
-    base32 decode, minus the 4-byte checksum) are the raw multihash bytes
-    of the IPFS CID. Re-encode with base32 (uppercase, no padding) to get
-    the CIDv1 string.
+    Algorand address = base32(32-byte-CID-multihash + 4-byte-checksum)
+    We decode the address, strip the checksum, then base58-encode
+    the multihash to get the standard Qm... CIDv1 string.
     """
     try:
         import base64
-        # Algorand addresses are base32-encoded 36 bytes (32 data + 4 checksum)
-        # Add padding if needed
-        padded = reserve_address + "=" * (-len(reserve_address) % 8)
-        decoded = base64.b32decode(padded)
-        # First 32 bytes are the CID multihash, drop the 4-byte checksum
-        cid_bytes = decoded[:32]
-        # ARC19 uses CIDv1 with sha2-256: prepend multihash header (0x12, 0x20)
-        multihash = bytes([0x12, 0x20]) + cid_bytes
-        # Base32 encode (uppercase, strip padding) → CIDv1 base32
-        cid = base64.b32encode(multihash).decode().rstrip("=").lower()
+
+        # Algorand addresses are base32 uppercase, 58 chars
+        # Pad to multiple of 8 for standard base32 decode
+        padded = reserve_address.upper() + "=" * (-len(reserve_address) % 8)
+        decoded = base64.b32decode(padded)  # 36 bytes: 32 data + 4 checksum
+        multihash_bytes = decoded[:32]      # raw multihash (sha2-256 digest)
+
+        # Prepend multihash header: 0x12 = sha2-256, 0x20 = 32 bytes length
+        full_multihash = bytes([0x12, 0x20]) + multihash_bytes
+
+        # Base58 encode to get standard Qm... CID
+        BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        num = int.from_bytes(full_multihash, "big")
+        result = []
+        while num > 0:
+            num, rem = divmod(num, 58)
+            result.append(BASE58_ALPHABET[rem:rem+1])
+        # Add leading "1"s for leading zero bytes
+        for byte in full_multihash:
+            if byte == 0:
+                result.append(b"1")
+            else:
+                break
+        cid = b"".join(reversed(result)).decode()
         return cid
     except Exception as e:
         print(f"[ARC19] CID decode failed: {e}")
@@ -2145,8 +2156,11 @@ def decode_arc19_reserve(reserve_address: str) -> str | None:
 async def fetch_live_image_url(asa_id: str) -> str | None:
     """
     Fetch the current image URL for a MONSTR ASA from the Algorand indexer.
-    Uses the ARC19 reserve address decode to get the live IPFS CID.
-    Falls back to the stored hash in MONSTR_ASSETS if fetch fails.
+    ARC19 assets store metadata in the asset URL as a template:
+      template-ipfs://{ipfscid:1:raw:reserve:sha2-256}
+    The actual IPFS CID is encoded in the reserve address field.
+    We fetch the asset params and extract the URL field, then decode the reserve.
+    Falls back to stored hash in MONSTR_ASSETS if fetch fails.
     """
     import urllib.request
     import json
@@ -2164,15 +2178,24 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
             data = json.loads(r.read())
 
         params = data.get("asset", {}).get("params", {})
+        asset_url = params.get("url", "")
         reserve = params.get("reserve")
 
-        if reserve:
+        # ARC19: URL is template-ipfs://{ipfscid:...}
+        # The reserve address encodes the CID — decode it to base58 (Qm...) CID
+        if "template-ipfs" in asset_url and reserve:
             cid = decode_arc19_reserve(reserve)
             if cid:
                 print(f"[ARC19] Live CID for ASA {asa_id}: {cid}")
                 return f"{IPFS_GATEWAY}{cid}"
 
-        print(f"[ARC19] No reserve field for ASA {asa_id}, using fallback")
+        # Fallback: if URL is a direct ipfs:// link, use it
+        if asset_url.startswith("ipfs://"):
+            cid = asset_url.replace("ipfs://", "")
+            print(f"[ARC19] Direct IPFS URL for ASA {asa_id}: {cid}")
+            return f"{IPFS_GATEWAY}{cid}"
+
+        print(f"[ARC19] Could not resolve image for ASA {asa_id}, using fallback")
         return None
 
     except Exception as e:
