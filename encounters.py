@@ -2229,11 +2229,33 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
             print(f"[ARC19] No image field in metadata for ASA {asa_id}")
             return None
 
-        # image field is ipfs://QmXXX — build final image URL using first working gateway
+        # image field is ipfs://QmXXX — fetch image bytes directly
         image_cid = image_field.replace("ipfs://", "")
-        image_url = f"{IPFS_GATEWAY}{image_cid}"
-        print(f"[ARC19] Image URL for ASA {asa_id}: {image_url}")
-        return image_url
+
+        IMAGE_GATEWAYS = [
+            "https://ipfs.algonode.xyz/ipfs/",
+            "https://ipfs.io/ipfs/",
+            "https://gateway.pinata.cloud/ipfs/",
+            "https://cloudflare-ipfs.com/ipfs/",
+            "https://dweb.link/ipfs/",
+        ]
+
+        for gw in IMAGE_GATEWAYS:
+            try:
+                image_url = f"{gw}{image_cid}"
+                req3 = urllib.request.Request(image_url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; MONSTRSBot/1.0)",
+                })
+                with urllib.request.urlopen(req3, timeout=15) as r:
+                    image_bytes = r.read()
+                print(f"[ARC19] Image fetched ({len(image_bytes)} bytes) via {gw}")
+                return image_bytes
+            except Exception as e:
+                print(f"[ARC19] Image gateway {gw} failed: {e}")
+                continue
+
+        print(f"[ARC19] All image gateways failed for ASA {asa_id}")
+        return None
 
     except Exception as e:
         print(f"[ARC19] Live fetch failed for ASA {asa_id}: {e}")
@@ -2251,17 +2273,16 @@ async def pick_random_monstr(boss: bool = False) -> dict:
     name, _ = MONSTR_ASSETS[asa_id]
     base_hp = random.randint(800, 1500)
 
-    # Always fetch live image — fallback to stored hash if indexer fails
-    image_url = await fetch_live_image_url(asa_id)
-    if not image_url:
-        image_url = get_fallback_image_url(asa_id)
+    # Fetch live image bytes — fallback to stored URL if fetch fails
+    image_bytes = await fetch_live_image_url(asa_id)
 
     return {
-        "asa_id": asa_id,
-        "name": name,
-        "image_url": image_url,
-        "max_hp": base_hp * 3 if boss else base_hp,
-        "is_boss": boss,
+        "asa_id":       asa_id,
+        "name":         name,
+        "image_bytes":  image_bytes,  # raw bytes or None
+        "image_url":    get_fallback_image_url(asa_id),  # fallback URL
+        "max_hp":       base_hp * 3 if boss else base_hp,
+        "is_boss":      boss,
     }
 
 
@@ -2705,7 +2726,16 @@ class EncountersCog(commands.Cog):
         embed = self._build_encounter_embed(self.active_encounter)
         view = self._build_attack_view()
         prefix = "👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else "⚠️ **A MONSTR has appeared!** Attack now to earn $GOO!"
-        self.encounter_message = await channel.send(prefix, embed=embed, view=view)
+
+        image_bytes = self.active_encounter.monstr.get("image_bytes")
+        if image_bytes:
+            import io
+            file = discord.File(io.BytesIO(image_bytes), filename="monstr.png")
+            embed.set_image(url="attachment://monstr.png")
+            self.encounter_message = await channel.send(prefix, embed=embed, view=view, file=file)
+        else:
+            # Fallback to URL if bytes unavailable
+            self.encounter_message = await channel.send(prefix, embed=embed, view=view)
 
         await asyncio.sleep(ENCOUNTER_DURATION)
         await self._close_encounter(channel)
@@ -2763,7 +2793,12 @@ class EncountersCog(commands.Cog):
             ),
             color=color,
         )
-        embed.set_image(url=state.monstr["image_url"])
+        # Image is set as attachment in run_encounter for initial post
+        # For HP bar updates we reuse attachment://monstr.png which stays cached
+        if state.monstr.get("image_bytes"):
+            embed.set_image(url="attachment://monstr.png")
+        else:
+            embed.set_image(url=state.monstr.get("image_url", ""))
         embed.set_footer(text=f"ASA #{state.monstr['asa_id']}{ ' — BOSS ENCOUNTER' if state.is_boss else ''}")
         return embed
 
@@ -2796,7 +2831,10 @@ class EncountersCog(commands.Cog):
             description="\n".join(lines) if lines else "Nobody attacked...",
             color=color,
         )
-        embed.set_thumbnail(url=state.monstr["image_url"])
+        if state.monstr.get("image_bytes"):
+            embed.set_thumbnail(url="attachment://monstr.png")
+        else:
+            embed.set_thumbnail(url=state.monstr.get("image_url", ""))
         embed.set_footer(text=f"GOO being sent on-chain now... | Total: {sum(payouts.values()):,} $GOO")
         return embed
 
