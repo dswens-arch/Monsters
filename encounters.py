@@ -2678,6 +2678,18 @@ class EncountersCog(commands.Cog):
             print(f"[ERROR] leaderboard: {e}")
             await interaction.followup.send("Couldn't load the leaderboard right now.", ephemeral=True)
 
+    # ── TEST COMMANDS (remove before going live) ──
+
+    @discord.app_commands.command(name="testencounter", description="[TEST] Fire a standard encounter now")
+    async def test_encounter(self, interaction: discord.Interaction):
+        await interaction.response.send_message("🧪 Spawning test encounter...", ephemeral=True)
+        asyncio.create_task(self.run_encounter(boss=False))
+
+    @discord.app_commands.command(name="testboss", description="[TEST] Fire a boss encounter now")
+    async def test_boss(self, interaction: discord.Interaction):
+        await interaction.response.send_message("🧪 Spawning test boss encounter...", ephemeral=True)
+        asyncio.create_task(self.run_encounter(boss=True))
+
 
 # ─────────────────────────────────────────────
 # WALLET COG
