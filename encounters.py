@@ -2287,7 +2287,7 @@ def get_fallback_image_url(asa_id: str) -> str:
 async def pick_random_monstr(boss: bool = False) -> dict:
     asa_id = random.choice(list(MONSTR_ASSETS.keys()))
     name, _ = MONSTR_ASSETS[asa_id]
-    base_hp = random.randint(800, 1500)
+    base_hp = random.randint(2400, 4500)
 
     # Fetch live image bytes with timeout guard
     try:
@@ -2942,7 +2942,6 @@ class EncountersCog(commands.Cog):
         if state.damage_dealt:
             top_damage_uid = max(state.damage_dealt, key=state.damage_dealt.get)
             top_attacks_uid = max(state.attack_counts, key=state.attack_counts.get) if state.attack_counts else None
-
             for uid in state.damage_dealt:
                 bonus = 0
                 if uid == top_damage_uid:
@@ -2955,59 +2954,59 @@ class EncountersCog(commands.Cog):
                     payouts[uid] = payouts.get(uid, 0) + bonus
                     print(f"[BONUS] {uid} gets +{bonus} GOO (damage:{uid==top_damage_uid} attacks:{uid==top_attacks_uid} crits:{state.crit_counts.get(uid,0)})")
 
-        # ── Log to DB + update weekly stats ──
-        try:
-            print("[CLOSE] Writing to DB...")
-            await asyncio.to_thread(log_encounter_to_db, state, payouts)
-            print("[CLOSE] DB write OK")
-            await asyncio.to_thread(update_weekly_stats, state)
-            print("[CLOSE] Weekly stats OK")
-        except Exception as e:
-            print(f"[ERROR] DB write on close: {e}")
+        # ── Clear active encounter immediately so next battle can start ──
+        self.active_encounter = None
+        self.encounter_message = None
+        self._attack_cooldowns.clear()
 
-        # ── Update all-time stats + check milestones ──
-        milestone_tasks = []
-        try:
-            db = get_supabase()
-            for uid, dmg in state.damage_dealt.items():
-                got_kill = uid == state.kill_shotter
-                attacks = state.attack_counts.get(uid, 0)
-                crits = state.crit_counts.get(uid, 0)
-                goo = payouts.get(uid, 0)
-                updated = update_player_stats(db, str(uid), dmg, attacks, crits, got_kill, goo)
-                milestones = check_and_award_milestones(db, str(uid), updated)
-                if milestones:
-                    milestone_tasks.append((uid, milestones))
-        except Exception as e:
-            print(f"[ERROR] Stats/milestone update: {e}")
-
-        # ── Post results ──
+        # ── Post results embed first ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
-        # Edit the original battle message to show final results
-        if self.encounter_message:
-            try:
-                await self.encounter_message.edit(embed=results_embed, view=None)
-            except Exception as e:
-                print(f"[WARN] Could not edit encounter message: {e}")
-                await channel.send(embed=results_embed)
-        else:
-            await channel.send(embed=results_embed)
+        try:
+            # Try to edit the original message if it still exists
+            from discord import NotFound
+        except ImportError:
+            pass
+        results_message = await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
-        # ── Announce milestones ──
-        for uid, milestones in milestone_tasks:
-            await announce_milestones(self.bot, channel, uid, milestones)
-
-        # ── Auto payout on-chain ──
+        # ── Fire payouts in parallel immediately after results ──
         print("[CLOSE] Starting payout_all...")
         await payout_all(state, payouts, channel)
         print("[CLOSE] payout_all complete")
 
-        self.active_encounter = None
-        self.encounter_message = None
-        self._attack_cooldowns.clear()
-        print("[CLOSE] Encounter fully closed")
+        # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
+        async def _background_tasks():
+            try:
+                print("[CLOSE] Writing to DB...")
+                await asyncio.to_thread(log_encounter_to_db, state, payouts)
+                print("[CLOSE] DB write OK")
+                await asyncio.to_thread(update_weekly_stats, state)
+                print("[CLOSE] Weekly stats OK")
+            except Exception as e:
+                print(f"[ERROR] DB write: {e}")
+
+            milestone_tasks = []
+            try:
+                db = get_supabase()
+                for uid, dmg in state.damage_dealt.items():
+                    got_kill = uid == state.kill_shotter
+                    attacks = state.attack_counts.get(uid, 0)
+                    crits = state.crit_counts.get(uid, 0)
+                    goo = payouts.get(uid, 0)
+                    updated = update_player_stats(db, str(uid), dmg, attacks, crits, got_kill, goo)
+                    milestones = check_and_award_milestones(db, str(uid), updated)
+                    if milestones:
+                        milestone_tasks.append((uid, milestones))
+            except Exception as e:
+                print(f"[ERROR] Stats/milestone update: {e}")
+
+            for uid, milestones in milestone_tasks:
+                await announce_milestones(self.bot, channel, uid, milestones)
+
+            print("[CLOSE] Encounter fully closed")
+
+        asyncio.create_task(_background_tasks())
 
     # ── Embeds ─────────────────────────────────
 
