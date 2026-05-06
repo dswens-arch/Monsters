@@ -2574,21 +2574,12 @@ def _add_pending(db, user_id: str, amount: int):
 # ─────────────────────────────────────────────
 
 def should_schedule_boss(db) -> bool:
-    """True if no boss in last 30 days, bot has been running 14+ days, and random 1-in-60 rolls hit."""
+    """True if no boss in last 30 days and random 1-in-60 rolls hit."""
     try:
         thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         recent = db.table("encounters").select("id").eq("is_boss", True).gte("started_at", thirty_days_ago).execute()
         if recent.data:
             return False  # Boss already happened this month
-
-        # Don't allow boss until at least 14 days of encounters have run
-        fourteen_days_ago = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-        early = db.table("encounters").select("id").lt("started_at", fourteen_days_ago).execute()
-        if not early.data:
-            print("[BOSS] Too early — waiting for 14 days of encounters before first boss")
-            return False
-
-        # Random chance — roughly 1-in-60 encounters (30 days × 2/day)
         return random.randint(1, 60) == 1
     except Exception as e:
         print(f"[BOSS] schedule check failed: {e}")
