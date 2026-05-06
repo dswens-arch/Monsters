@@ -83,7 +83,8 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
     )
     signed = txn.sign(private_key)
     tx_id = client.send_transaction(signed)
-    transaction.wait_for_confirmation(client, tx_id, wait_rounds=4)
+    # Fire and forget — don't wait for confirmation
+    # TxID is logged; failed sends fall back to pending_goo automatically
     return tx_id
 
 def has_opted_in(wallet_address: str) -> bool:
