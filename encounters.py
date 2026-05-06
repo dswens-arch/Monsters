@@ -2343,6 +2343,7 @@ class EncounterState:
         self.tag_pairs:     dict[int, int] = {}
         self.attackers_ordered: list[int] = []
         self.crit_count:    int = 0
+        self.total_attacks: int = 0  # for rate limiting embed updates
 
     def register_attack(self, user_id: int, tagged_id: int | None) -> dict:
         if not self.alive:
@@ -2368,6 +2369,7 @@ class EncounterState:
 
         self.damage_dealt[user_id] += damage
         self.attack_counts[user_id] = self.attack_counts.get(user_id, 0) + 1
+        self.total_attacks += 1
         self.hp = max(0, self.hp - damage)
 
         if is_crit:
@@ -2803,6 +2805,7 @@ class EncountersCog(commands.Cog):
         self._next_encounters: dict = {}
         self._pending_boss: bool = False
         self._attack_cooldowns: dict[int, float] = {}  # user_id → last attack timestamp
+        self._last_embed_update: float = 0.0  # timestamp of last embed edit
         self.encounter_scheduler.start()
 
     def cog_unload(self):
@@ -2981,7 +2984,15 @@ class EncountersCog(commands.Cog):
         # ── Post results ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
-        await channel.send(embed=results_embed)
+        # Edit the original battle message to show final results
+        if self.encounter_message:
+            try:
+                await self.encounter_message.edit(embed=results_embed, view=None)
+            except Exception as e:
+                print(f"[WARN] Could not edit encounter message: {e}")
+                await channel.send(embed=results_embed)
+        else:
+            await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
         # ── Announce milestones ──
@@ -3023,6 +3034,27 @@ class EncountersCog(commands.Cog):
         else:
             embed.set_image(url=state.monstr.get("image_url", ""))
         embed.set_footer(text=f"ASA #{state.monstr['asa_id']}{ ' — BOSS ENCOUNTER' if state.is_boss else ''}")
+        return embed
+
+    def _build_defeated_embed(self, state: EncounterState) -> discord.Embed:
+        """Shown immediately when HP hits zero — replaces the live battle embed."""
+        color = 0xff0000 if state.is_boss else 0xff4444
+        title = f"☠️ {state.monstr['name']} has been defeated!"
+
+        embed = discord.Embed(
+            title=title,
+            description=(
+                "\u2588" * 20 + " 💀 **DEFEATED**\n\n"
+                "Calculating payouts and sending $GOO...\n"
+                "Results incoming!"
+            ),
+            color=color,
+        )
+        if state.monstr.get("image_bytes"):
+            embed.set_thumbnail(url="attachment://monstr.jpg")
+        else:
+            embed.set_thumbnail(url=state.monstr.get("image_url", ""))
+        embed.set_footer(text=f"ASA #{state.monstr['asa_id']}")
         return embed
 
     def _build_results_embed(self, state: EncounterState, payouts: dict[int, int]) -> discord.Embed:
@@ -3129,12 +3161,26 @@ class EncountersCog(commands.Cog):
         if "kill_shot" in events:
             await channel.send(f"💀 **KILL SHOT!** <@{user_id}> finished off {state.monstr['name']}! Paying out now...")
 
-        # Update main embed HP bar
-        if state.alive and self.encounter_message:
+        # Update main embed on every attack, respecting Discord's 1/sec rate limit
+        import time as _time
+        if self.encounter_message:
             try:
-                updated_embed = self._build_encounter_embed(state)
-                view = self._build_attack_view()
-                await self.encounter_message.edit(embed=updated_embed, view=view)
+                if not state.alive:
+                    # Always update immediately on defeat
+                    defeated_embed = self._build_defeated_embed(state)
+                    await self.encounter_message.edit(embed=defeated_embed, view=None)
+                    self._last_embed_update = _time.time()
+                elif _time.time() - self._last_embed_update >= 1.1:
+                    # Update if at least 1.1 seconds since last edit
+                    updated_embed = self._build_encounter_embed(state)
+                    view = self._build_attack_view()
+                    await self.encounter_message.edit(embed=updated_embed, view=view)
+                    self._last_embed_update = _time.time()
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    print(f"[WARN] Rate limited on embed update, skipping")
+                else:
+                    print(f"[WARN] embed update: {e}")
             except Exception as e:
                 print(f"[WARN] embed update: {e}")
 
