@@ -89,18 +89,22 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
 
 def has_opted_in(wallet_address: str) -> bool:
     from algosdk.v2client import algod
+    import urllib.request
+    import json
     try:
-        client = algod.AlgodClient(
-            algod_token=os.getenv("ALGOD_TOKEN", ""),
-            algod_address=os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud"),
-        )
         asset_id = int(os.environ["GOO_ASSET_ID"])
-        # Targeted lookup — only fetches this one asset, not entire wallet
-        info = client.account_asset_info(wallet_address, asset_id)
+        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        url = f"{algod_url}/v2/accounts/{wallet_address}/assets/{asset_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+        })
+        with urllib.request.urlopen(req, timeout=5) as r:
+            r.read()
         print(f"[WALLET] opt-in confirmed for {wallet_address[:8]}...")
         return True
     except Exception as e:
-        if "404" in str(e) or "does not exist" in str(e).lower():
+        if "404" in str(e) or "HTTP Error 404" in str(e):
             print(f"[WALLET] {wallet_address[:8]}... not opted in to GOO")
         else:
             print(f"[WALLET] opt-in check failed: {e}")
@@ -2502,43 +2506,59 @@ def _week_start() -> str:
     return monday.strftime("%Y-%m-%d")
 
 async def payout_all(state: EncounterState, payouts: dict[int, int], channel: discord.TextChannel):
-    """Send GOO on-chain to all linked+opted-in players. Hold pending for others."""
+    """
+    Resolve wallets + opt-in checks in parallel, then fire all sends
+    as background tasks so results post instantly.
+    """
     db = get_supabase()
-    failed_lines = []
 
-    async def _pay_one(uid, amount):
+    async def _resolve(uid, amount):
+        """Check wallet + opt-in. Returns (uid, wallet, amount) or None."""
         if amount <= 0:
-            return
+            return None
         try:
-            wallet_row = db.table("linked_wallets").select("wallet_address").eq("user_id", str(uid)).execute()
-            if not wallet_row.data:
-                _add_pending(db, str(uid), amount)
-                failed_lines.append(f"<@{uid}> — wallet not linked, GOO held ({amount:,})")
-                return
-            wallet = wallet_row.data[0]["wallet_address"]
-            if not has_opted_in(wallet):
-                _add_pending(db, str(uid), amount)
-                failed_lines.append(f"<@{uid}> — not opted in to $GOO, GOO held ({amount:,})")
-                return
-            tx_id = await asyncio.to_thread(send_goo, wallet, amount)
-            print(f"[PAYOUT] {amount} GOO → {uid} ({wallet[:8]}...) TxID: {tx_id}")
-        except Exception as e:
-            print(f"[ERROR] payout for {uid}: {e}")
-            _add_pending(db, str(uid), amount)
-            failed_lines.append(f"<@{uid}> — send failed, GOO held ({amount:,})")
-
-    # Fire all payouts in parallel
-    await asyncio.gather(*[_pay_one(uid, amount) for uid, amount in payouts.items()])
-
-    if failed_lines:
-        try:
-            await channel.send(
-                "⚠️ Some payouts were held — use `/link` and opt into $GOO ASA to claim:\n" +
-                "\n".join(failed_lines),
-                delete_after=120
+            wallet_row = await asyncio.to_thread(
+                lambda: db.table("linked_wallets").select("wallet_address").eq("user_id", str(uid)).execute()
             )
-        except Exception:
-            pass
+            if not wallet_row.data:
+                await asyncio.to_thread(_add_pending, db, str(uid), amount)
+                print(f"[PAYOUT] {uid} no wallet linked, holding {amount}")
+                return None
+            wallet = wallet_row.data[0]["wallet_address"]
+            try:
+                opted = await asyncio.wait_for(asyncio.to_thread(has_opted_in, wallet), timeout=5)
+            except asyncio.TimeoutError:
+                opted = False
+            if not opted:
+                await asyncio.to_thread(_add_pending, db, str(uid), amount)
+                print(f"[PAYOUT] {uid} not opted in, holding {amount}")
+                return None
+            return (uid, wallet, amount)
+        except Exception as e:
+            print(f"[PAYOUT] resolve failed for {uid}: {e}")
+            await asyncio.to_thread(_add_pending, db, str(uid), amount)
+            return None
+
+    async def _send(uid, wallet, amount):
+        """Fire and forget — send GOO, hold on any failure."""
+        try:
+            tx_id = await asyncio.wait_for(asyncio.to_thread(send_goo, wallet, amount), timeout=15)
+            print(f"[PAYOUT] {amount} GOO → {uid} ({wallet[:8]}...) TxID: {tx_id}")
+        except asyncio.TimeoutError:
+            print(f"[PAYOUT] timeout for {uid}, holding {amount}")
+            await asyncio.to_thread(_add_pending, db, str(uid), amount)
+        except Exception as e:
+            print(f"[PAYOUT] send failed for {uid}: {e}")
+            await asyncio.to_thread(_add_pending, db, str(uid), amount)
+
+    # Step 1: resolve all wallets in parallel (with timeouts)
+    resolved = await asyncio.gather(*[_resolve(uid, amt) for uid, amt in payouts.items()])
+    sendable = [r for r in resolved if r is not None]
+    print(f"[PAYOUT] {len(sendable)}/{len(payouts)} wallets ready to pay")
+
+    # Step 2: fire all sends as background task — doesn't block results posting
+    if sendable:
+        asyncio.create_task(asyncio.gather(*[_send(uid, wallet, amount) for uid, wallet, amount in sendable]))
 
 def _add_pending(db, user_id: str, amount: int):
     existing = db.table("pending_goo").select("amount").eq("user_id", user_id).execute()
