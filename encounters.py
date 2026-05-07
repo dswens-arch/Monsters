@@ -2558,7 +2558,9 @@ async def payout_all(state: EncounterState, payouts: dict[int, int], channel: di
 
     # Step 2: fire all sends as background task — doesn't block results posting
     if sendable:
-        asyncio.create_task(asyncio.gather(*[_send(uid, wallet, amount) for uid, wallet, amount in sendable]))
+        async def _send_all():
+            await asyncio.gather(*[_send(uid, wallet, amount) for uid, wallet, amount in sendable])
+        asyncio.create_task(_send_all())
 
 def _add_pending(db, user_id: str, amount: int):
     existing = db.table("pending_goo").select("amount").eq("user_id", user_id).execute()
@@ -3156,7 +3158,7 @@ class EncountersCog(commands.Cog):
         if "first_strike" in events:
             lines.append("🥊 **First Strike!** Bonus GOO incoming.")
         if "kill_shot" in events:
-            lines.append("💀 **KILL SHOT!** Big bonus incoming.")
+            lines.append("💀 **Kill Shot landed!** Bonus incoming — check results.")
         if tagged_name:
             lines.append(f"🤝 Teamed up with **{tagged_name}**! You both get a bonus.")
 
@@ -3169,7 +3171,9 @@ class EncountersCog(commands.Cog):
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
         if "kill_shot" in events:
-            await channel.send(f"💀 **KILL SHOT!** <@{user_id}> finished off {state.monstr['name']}! Paying out now...")
+            # Don't announce kill shot here — wait for close sequence
+            # which has the correct final kill shot assignment
+            pass
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
