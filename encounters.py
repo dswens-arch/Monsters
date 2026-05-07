@@ -2382,7 +2382,9 @@ class EncounterState:
 
     @property
     def monstr(self):
-        return self.monstrs[self.wave_index]
+        # Clamp to last MONSTR so close sequence doesn't crash after all waves done
+        idx = min(self.wave_index, len(self.monstrs) - 1)
+        return self.monstrs[idx]
 
     @property
     def wave_num(self):
