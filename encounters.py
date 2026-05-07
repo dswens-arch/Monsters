@@ -2291,9 +2291,8 @@ def get_fallback_image_url(asa_id: str) -> str:
 async def pick_random_monstr(boss: bool = False) -> dict:
     asa_id = random.choice(list(MONSTR_ASSETS.keys()))
     name, _ = MONSTR_ASSETS[asa_id]
-    base_hp = random.randint(2400, 4500)
+    base_hp = random.randint(5000, 10000)
 
-    # Fetch live image bytes with timeout guard
     try:
         image_bytes = await asyncio.wait_for(fetch_live_image_url(asa_id), timeout=20)
     except asyncio.TimeoutError:
@@ -2312,6 +2311,13 @@ async def pick_random_monstr(boss: bool = False) -> dict:
         "is_boss":      boss,
     }
 
+async def pick_wave(boss: bool = False) -> list:
+    """Pick MONSTR(s) for an encounter. Boss = 1, standard = 3 waves."""
+    count = 1 if boss else WAVE_COUNT
+    # Fetch all wave MONSTRs concurrently
+    monstrs = await asyncio.gather(*[pick_random_monstr(boss=boss) for _ in range(count)])
+    return list(monstrs)
+
 
 # ─────────────────────────────────────────────
 # PAYOUT CONFIG
@@ -2323,8 +2329,16 @@ FIRST_STRIKE_BONUS = 500
 TEAM_BONUS_POOL    = 750
 TOTAL_GOO          = DAMAGE_POOL + KILL_SHOT_BONUS + FIRST_STRIKE_BONUS + TEAM_BONUS_POOL  # 5000
 BOSS_MULTIPLIER    = 3
-ENCOUNTER_DURATION = 600   # 10 minutes
+ENCOUNTER_DURATION = 600   # 10 minutes total for all waves
 CRIT_CHANCE        = 0.05  # 5%
+WAVE_COUNT         = 3     # MONSTRs per encounter (boss = 1)
+
+# Attack options — (label, emoji, min_dmg, max_dmg)
+ATTACK_OPTIONS = [
+    ("Zap",        "⚡", 30,  80),
+    ("Blaze",      "🔥", 60,  120),
+    ("Obliterate", "💀", 20,  200),
+]
 
 
 # ─────────────────────────────────────────────
@@ -2332,29 +2346,69 @@ CRIT_CHANCE        = 0.05  # 5%
 # ─────────────────────────────────────────────
 
 class EncounterState:
-    def __init__(self, monstr: dict):
-        self.monstr             = monstr
-        self.hp                 = monstr["max_hp"]
-        self.max_hp             = monstr["max_hp"]
-        self.is_boss            = monstr.get("is_boss", False)
-        self.alive              = True
+    def __init__(self, monstrs: list, is_boss: bool = False):
+        # Wave support — list of MONSTR dicts
+        self.monstrs            = monstrs
+        self.wave_index         = 0
+        self.is_boss            = is_boss
         self.started_at         = datetime.now(timezone.utc)
-        self.first_striker: int | None = None
-        self.kill_shotter:  int | None = None
+
+        # All-encounter tracking (persists across waves)
         self.damage_dealt:  dict[int, int] = {}
         self.attack_counts: dict[int, int] = {}
         self.crit_counts:   dict[int, int] = {}
         self.tag_pairs:     dict[int, int] = {}
         self.attackers_ordered: list[int] = []
+        self.total_attacks: int = 0
         self.crit_count:    int = 0
-        self.total_attacks: int = 0  # for rate limiting embed updates
 
-    def register_attack(self, user_id: int, tagged_id: int | None) -> dict:
+        # Per-wave tracking (reset on each new wave)
+        self.first_striker: int | None = None
+        self.kill_shotter:  int | None = None
+        self.wave_kills:    list[int | None] = []  # kill shotter per wave
+
+        # Init first wave
+        self._init_wave()
+
+    def _init_wave(self):
+        m = self.monstrs[self.wave_index]
+        self.hp     = m["max_hp"]
+        self.max_hp = m["max_hp"]
+        self.alive  = True
+        if self.wave_index == 0:
+            self.first_striker = None
+        # Kill shotter resets per wave
+        self.kill_shotter = None
+
+    @property
+    def monstr(self):
+        return self.monstrs[self.wave_index]
+
+    @property
+    def wave_num(self):
+        return self.wave_index + 1
+
+    @property
+    def total_waves(self):
+        return len(self.monstrs)
+
+    def next_wave(self) -> bool:
+        """Advance to next wave. Returns True if there is one, False if encounter over."""
+        self.wave_kills.append(self.kill_shotter)
+        self.wave_index += 1
+        if self.wave_index >= len(self.monstrs):
+            return False
+        self._init_wave()
+        return True
+
+    def register_attack(self, user_id: int, tagged_id: int | None, attack_type: int = 1) -> dict:
+        """attack_type: 0=Zap, 1=Blaze, 2=Obliterate"""
         if not self.alive:
             return {"error": "encounter_over"}
 
         is_crit = random.random() < CRIT_CHANCE
-        base_damage = random.randint(40, 120)
+        _, _, min_dmg, max_dmg = ATTACK_OPTIONS[attack_type]
+        base_damage = random.randint(min_dmg, max_dmg)
         damage = base_damage * (2 if is_crit else 1)
         if self.is_boss:
             damage = int(damage * BOSS_MULTIPLIER * 0.6)  # scaled for boss HP
@@ -2507,60 +2561,24 @@ def _week_start() -> str:
 
 async def payout_all(state: EncounterState, payouts: dict[int, int], channel: discord.TextChannel):
     """
-    Resolve wallets + opt-in checks in parallel, then fire all sends
-    as background tasks so results post instantly.
+    Instant version — just credits GOO balances in Supabase.
+    Background sender loop handles actual on-chain transfers.
     """
     db = get_supabase()
-
-    async def _resolve(uid, amount):
-        """Check wallet + opt-in. Returns (uid, wallet, amount) or None."""
+    for uid, amount in payouts.items():
         if amount <= 0:
-            return None
+            continue
         try:
-            wallet_row = await asyncio.to_thread(
-                lambda: db.table("linked_wallets").select("wallet_address").eq("user_id", str(uid)).execute()
-            )
-            if not wallet_row.data:
-                await asyncio.to_thread(_add_pending, db, str(uid), amount)
-                print(f"[PAYOUT] {uid} no wallet linked, holding {amount}")
-                return None
-            wallet = wallet_row.data[0]["wallet_address"]
-            try:
-                opted = await asyncio.wait_for(asyncio.to_thread(has_opted_in, wallet), timeout=5)
-            except asyncio.TimeoutError:
-                opted = False
-            if not opted:
-                await asyncio.to_thread(_add_pending, db, str(uid), amount)
-                print(f"[PAYOUT] {uid} not opted in, holding {amount}")
-                return None
-            return (uid, wallet, amount)
+            existing = db.table("goo_balances").select("balance").eq("user_id", str(uid)).execute()
+            if existing.data:
+                new_bal = existing.data[0]["balance"] + amount
+                db.table("goo_balances").update({"balance": new_bal, "needs_payout": True}).eq("user_id", str(uid)).execute()
+            else:
+                db.table("goo_balances").insert({"user_id": str(uid), "balance": amount, "needs_payout": True}).execute()
+            print(f"[PAYOUT] Credited {amount} GOO to {uid}")
         except Exception as e:
-            print(f"[PAYOUT] resolve failed for {uid}: {e}")
-            await asyncio.to_thread(_add_pending, db, str(uid), amount)
-            return None
+            print(f"[PAYOUT] Credit failed for {uid}: {e}")
 
-    async def _send(uid, wallet, amount):
-        """Fire and forget — send GOO, hold on any failure."""
-        try:
-            tx_id = await asyncio.wait_for(asyncio.to_thread(send_goo, wallet, amount), timeout=15)
-            print(f"[PAYOUT] {amount} GOO → {uid} ({wallet[:8]}...) TxID: {tx_id}")
-        except asyncio.TimeoutError:
-            print(f"[PAYOUT] timeout for {uid}, holding {amount}")
-            await asyncio.to_thread(_add_pending, db, str(uid), amount)
-        except Exception as e:
-            print(f"[PAYOUT] send failed for {uid}: {e}")
-            await asyncio.to_thread(_add_pending, db, str(uid), amount)
-
-    # Step 1: resolve all wallets in parallel (with timeouts)
-    resolved = await asyncio.gather(*[_resolve(uid, amt) for uid, amt in payouts.items()])
-    sendable = [r for r in resolved if r is not None]
-    print(f"[PAYOUT] {len(sendable)}/{len(payouts)} wallets ready to pay")
-
-    # Step 2: fire all sends as background task — doesn't block results posting
-    if sendable:
-        async def _send_all():
-            await asyncio.gather(*[_send(uid, wallet, amount) for uid, wallet, amount in sendable])
-        asyncio.create_task(_send_all())
 
 def _add_pending(db, user_id: str, amount: int):
     existing = db.table("pending_goo").select("amount").eq("user_id", user_id).execute()
@@ -2758,17 +2776,22 @@ class TeammateSelect(discord.ui.UserSelect):
         await self.cog._process_attack(
             interaction,
             tagged_id=selected.id,
-            tagged_name=selected.display_name
+            tagged_name=selected.display_name,
+            attack_type=1  # Blaze for team attacks
         )
 
 
 class AttackButton(discord.ui.Button):
-    def __init__(self):
+    def __init__(self, attack_type: int):
+        label, emoji, min_d, max_d = ATTACK_OPTIONS[attack_type]
         super().__init__(
-            label="⚔️ Attack",
-            style=discord.ButtonStyle.danger,
-            custom_id="attack_solo",
+            label=f"{emoji} {label}",
+            style=discord.ButtonStyle.danger if attack_type == 2 else (
+                discord.ButtonStyle.primary if attack_type == 0 else discord.ButtonStyle.success
+            ),
+            custom_id=f"attack_{attack_type}",
         )
+        self.attack_type = attack_type
 
     async def callback(self, interaction: discord.Interaction):
         cog = interaction.client.cogs.get("EncountersCog")
@@ -2778,7 +2801,7 @@ class AttackButton(discord.ui.Button):
                 ephemeral=True
             )
             return
-        await cog._process_attack(interaction, tagged_id=None, tagged_name=None)
+        await cog._process_attack(interaction, tagged_id=None, tagged_name=None, attack_type=self.attack_type)
 
 
 class TagTeammateButton(discord.ui.Button):
@@ -2820,9 +2843,58 @@ class EncountersCog(commands.Cog):
         self._attack_cooldowns: dict[int, float] = {}  # user_id → last attack timestamp
         self._last_embed_update: float = 0.0  # timestamp of last embed edit
         self.encounter_scheduler.start()
+        self.goo_sender.start()
 
     def cog_unload(self):
         self.encounter_scheduler.cancel()
+        self.goo_sender.cancel()
+
+    @tasks.loop(seconds=30)
+    async def goo_sender(self):
+        """Background loop — sends pending GOO balances on-chain every 30 seconds."""
+        try:
+            db = get_supabase()
+            rows = db.table("goo_balances").select("*").eq("needs_payout", True).gt("balance", 0).execute()
+            if not rows.data:
+                return
+
+            for row in rows.data:
+                user_id = row["user_id"]
+                amount = row["balance"]
+                try:
+                    wallet_row = db.table("linked_wallets").select("wallet_address").eq("user_id", user_id).execute()
+                    if not wallet_row.data:
+                        continue
+                    wallet = wallet_row.data[0]["wallet_address"]
+
+                    # Check opt-in with timeout
+                    try:
+                        opted = await asyncio.wait_for(asyncio.to_thread(has_opted_in, wallet), timeout=5)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not opted:
+                        continue
+
+                    # Send on-chain
+                    tx_id = await asyncio.wait_for(
+                        asyncio.to_thread(send_goo, wallet, amount),
+                        timeout=15
+                    )
+                    # Mark as sent
+                    db.table("goo_balances").update({"balance": 0, "needs_payout": False}).eq("user_id", user_id).execute()
+                    print(f"[SENDER] {amount} GOO → {user_id} ({wallet[:8]}...) TxID: {tx_id}")
+
+                except asyncio.TimeoutError:
+                    print(f"[SENDER] Timeout for {user_id}, will retry")
+                except Exception as e:
+                    print(f"[SENDER] Failed for {user_id}: {e}")
+
+        except Exception as e:
+            print(f"[SENDER] Loop error: {e}")
+
+    @goo_sender.before_loop
+    async def before_sender(self):
+        await self.bot.wait_until_ready()
 
     # ── Scheduler ──────────────────────────────
 
@@ -2907,38 +2979,30 @@ class EncountersCog(commands.Cog):
             print(f"[ERROR] Channel {self.channel_id} not found.")
             return
 
-        monstr = await pick_random_monstr(boss=boss)
-        self.active_encounter = EncounterState(monstr)
+        monstrs = await pick_wave(boss=boss)
+        self.active_encounter = EncounterState(monstrs, is_boss=boss)
 
-        embed = self._build_encounter_embed(self.active_encounter)
-        view = self._build_attack_view()
         role_ping = f"<@&{self.encounter_role_id}> " if self.encounter_role_id else ""
-        prefix = f"{role_ping}👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else f"{role_ping}⚠️ **A MONSTR has appeared!** Attack now to earn $GOO!"
+        prefix = f"{role_ping}👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else f"{role_ping}⚠️ **Wave 1/3 begins!** 3 MONSTRs — 5,000 $GOO up for grabs!"
 
-        image_bytes = self.active_encounter.monstr.get("image_bytes")
-        file = None
-        if image_bytes:
-            try:
-                import io
-                from PIL import Image
-                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                img.thumbnail((400, 400), Image.LANCZOS)
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=70, optimize=True)
-                buf.seek(0)
-                size_kb = buf.getbuffer().nbytes // 1024
-                print(f"[IMAGE] Resized to {size_kb}KB")
-                file = discord.File(buf, filename="monstr.jpg")
-                embed.set_image(url="attachment://monstr.jpg")
-            except Exception as e:
-                print(f"[IMAGE] Resize failed: {e}")
+        # Post first wave embed
+        await self._post_wave_embed(channel, prefix)
 
-        if file:
-            self.encounter_message = await channel.send(prefix, embed=embed, view=view, file=file)
-        else:
-            self.encounter_message = await channel.send(prefix, embed=embed, view=view)
+        # Run timed encounter — handle wave transitions
+        end_time = asyncio.get_event_loop().time() + ENCOUNTER_DURATION
+        while asyncio.get_event_loop().time() < end_time:
+            await asyncio.sleep(1)
+            state = self.active_encounter
+            if state and not state.alive:
+                has_next = state.next_wave()
+                if has_next:
+                    await self._post_wave_embed(
+                        channel,
+                        f"💥 **Wave {state.wave_num}/{state.total_waves}!** {state.monstr['name']} appears!"
+                    )
+                else:
+                    break  # All waves cleared
 
-        await asyncio.sleep(ENCOUNTER_DURATION)
         await self._close_encounter(channel)
 
     async def _close_encounter(self, channel: discord.TextChannel):
@@ -2972,22 +3036,17 @@ class EncountersCog(commands.Cog):
         self.encounter_message = None
         self._attack_cooldowns.clear()
 
-        # ── Post results embed first ──
+        # ── Credit GOO balances instantly (no chain involvement) ──
+        await payout_all(state, payouts, channel)
+        print("[CLOSE] GOO credited to balances — background sender handles on-chain")
+
+        # ── Post results immediately ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
-        try:
-            # Try to edit the original message if it still exists
-            from discord import NotFound
-        except ImportError:
-            pass
-        results_message = await channel.send(embed=results_embed)
+        await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
-        # ── Fire payouts in parallel immediately after results ──
-        print("[CLOSE] Starting payout_all...")
-        await payout_all(state, payouts, channel)
-        print("[CLOSE] payout_all complete")
-
+        # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
         # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
         async def _background_tasks():
             try:
@@ -3027,25 +3086,29 @@ class EncountersCog(commands.Cog):
         hp_bar = self._hp_bar(state.hp, state.max_hp)
         goo_total = TOTAL_GOO * (BOSS_MULTIPLIER if state.is_boss else 1)
         color = 0xff0000 if state.is_boss else 0x00ff99
-        title = f"👹 BOSS: {state.monstr['name']}!" if state.is_boss else f"👾 {state.monstr['name']} appeared!"
+
+        if state.is_boss:
+            title = f"👹 BOSS: {state.monstr['name']}!"
+            wave_line = ""
+        else:
+            title = f"👾 {state.monstr['name']} — Wave {state.wave_num}/{state.total_waves}"
+            wave_line = f"⚔️ Wave **{state.wave_num}** of **{state.total_waves}**\n"
+
         embed = discord.Embed(
             title=title,
             description=(
                 f"{hp_bar}\n\n"
-                f"**Tap Attack to deal damage!**\n"
-                f"Tap Tag a Friend to bring a teammate for a bonus.\n\n"
-                f"🏆 **{goo_total:,} $GOO** up for grabs\n"
-                f"⏱️ **10 minutes** to take it down"
+                f"{wave_line}"
+                f"🏆 **{goo_total:,} $GOO** shared across all waves\n\n"
+                f"Choose your attack:"
             ),
             color=color,
         )
-        # Image is set as attachment in run_encounter for initial post
-        # For HP bar updates we reuse attachment://monstr.png which stays cached
         if state.monstr.get("image_bytes"):
-            embed.set_image(url="attachment://monstr.png")
+            embed.set_image(url="attachment://monstr.jpg")
         else:
             embed.set_image(url=state.monstr.get("image_url", ""))
-        embed.set_footer(text=f"ASA #{state.monstr['asa_id']}{ ' — BOSS ENCOUNTER' if state.is_boss else ''}")
+        embed.set_footer(text=f"ASA #{state.monstr['asa_id']}{'  — BOSS' if state.is_boss else ''}")
         return embed
 
     def _build_defeated_embed(self, state: EncounterState) -> discord.Embed:
@@ -3102,7 +3165,7 @@ class EncountersCog(commands.Cog):
             embed.set_thumbnail(url="attachment://monstr.png")
         else:
             embed.set_thumbnail(url=state.monstr.get("image_url", ""))
-        embed.set_footer(text=f"GOO being sent on-chain now... | Total: {sum(payouts.values()):,} $GOO")
+        embed.set_footer(text=f"Total: {sum(payouts.values()):,} $GOO | Sending to wallets shortly...")
         return embed
 
     @staticmethod
@@ -3112,9 +3175,41 @@ class EncountersCog(commands.Cog):
         pct = int((hp / max_hp) * 100)
         return f"`{bar}` {pct}% HP"
 
+    # ── WAVE EMBED POSTER ─────────────────────────
+
+    async def _post_wave_embed(self, channel: discord.TextChannel, prefix: str):
+        """Post or update the encounter embed for a new wave."""
+        state = self.active_encounter
+        embed = self._build_encounter_embed(state)
+        view = self._build_attack_view()
+
+        image_bytes = state.monstr.get("image_bytes")
+        file = None
+        if image_bytes:
+            try:
+                import io
+                from PIL import Image
+                img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                img.thumbnail((400, 400), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70, optimize=True)
+                buf.seek(0)
+                size_kb = buf.getbuffer().nbytes // 1024
+                print(f"[IMAGE] Resized to {size_kb}KB")
+                file = discord.File(buf, filename="monstr.jpg")
+                embed.set_image(url="attachment://monstr.jpg")
+            except Exception as e:
+                print(f"[IMAGE] Resize failed: {e}")
+
+        if file:
+            self.encounter_message = await channel.send(prefix, embed=embed, view=view, file=file)
+        else:
+            self.encounter_message = await channel.send(prefix, embed=embed, view=view)
+        self._last_embed_update = 0.0
+
     # ── ATTACK PROCESSOR ───────────────────────
 
-    async def _process_attack(self, interaction: discord.Interaction, tagged_id: int | None, tagged_name: str | None):
+    async def _process_attack(self, interaction: discord.Interaction, tagged_id: int | None, tagged_name: str | None, attack_type: int = 1):
         state = self.active_encounter
         if not state:
             await interaction.response.send_message("The encounter has already ended.", ephemeral=True)
@@ -3135,7 +3230,7 @@ class EncountersCog(commands.Cog):
             return
         self._attack_cooldowns[user_id] = now
 
-        result = state.register_attack(user_id, tagged_id)
+        result = state.register_attack(user_id, tagged_id, attack_type=attack_type)
 
         if "error" in result:
             await interaction.response.send_message("The encounter has already ended.", ephemeral=True)
@@ -3202,7 +3297,8 @@ class EncountersCog(commands.Cog):
 
     def _build_attack_view(self) -> discord.ui.View:
         view = discord.ui.View(timeout=None)
-        view.add_item(AttackButton())
+        for i in range(len(ATTACK_OPTIONS)):
+            view.add_item(AttackButton(attack_type=i))
         view.add_item(TagTeammateButton())
         return view
 
