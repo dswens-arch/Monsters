@@ -2335,15 +2335,15 @@ WAVE_COUNT         = 3     # MONSTRs per encounter (boss = 1)
 
 # Attack options — (label, emoji, min_dmg, max_dmg, counter_chance)
 ATTACK_OPTIONS = [
-    ("Zap",        "⚡", 30,  80,  0.10),  # 10% counter chance
-    ("Blaze",      "🔥", 60,  120, 0.15),  # 15% counter chance
-    ("Obliterate", "💀", 20,  200, 0.25),  # 25% counter chance — riskier
+    ("Zap",        "⚡", 30,  80,  0.03),  # 3% counter chance
+    ("Blaze",      "🔥", 60,  120, 0.05),  # 5% counter chance
+    ("Obliterate", "💀", 20,  200, 0.10),  # 10% counter chance — riskier
 ]
 
 # Counter-attack config
-COUNTER_BASE_CHANCE  = 0.15   # base chance per wave
-COUNTER_WAVE_SCALING = 0.05   # +5% per wave (wave 2 = 20%, wave 3 = 25%)
-COUNTER_COOLDOWN     = 45     # seconds when stunned
+COUNTER_BASE_CHANCE  = 0.05   # base chance per wave
+COUNTER_WAVE_SCALING = 0.02   # +2% per wave (wave 2 = 7%, wave 3 = 9% for Blaze)
+COUNTER_COOLDOWN     = 30     # seconds when stunned
 BASE_COOLDOWN        = 15     # normal cooldown
 
 
@@ -3344,10 +3344,7 @@ class EncountersCog(commands.Cog):
             await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
-        if result.get("is_counter") and state.alive:
-            await channel.send(
-                f"💢 **{state.monstr['name']} COUNTER-ATTACKS!** <@{user_id}> is stunned for {COUNTER_COOLDOWN} seconds!"
-            )
+        # Counter-attack is ephemeral only — no public announcement
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
