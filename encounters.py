@@ -3073,6 +3073,24 @@ class EncountersCog(commands.Cog):
         await payout_all(state, payouts, channel)
         print("[CLOSE] GOO credited to balances — background sender handles on-chain")
 
+        # ── Show escaped state on main embed if time ran out ──
+        all_waves_done = state.wave_index >= state.total_waves
+        if not all_waves_done and self.encounter_message:
+            try:
+                escaped_embed = discord.Embed(
+                    title="💨 They got away...",
+                    description=(
+                        "The MONSTRs slipped back into the GOO.\n"
+                        "Better luck next time — encounters run twice a day!"
+                    ),
+                    color=0x555555,
+                )
+                if state.monstr.get("image_bytes"):
+                    escaped_embed.set_thumbnail(url="attachment://monstr.jpg")
+                await self.encounter_message.edit(embed=escaped_embed, view=None)
+            except Exception as e:
+                print(f"[WARN] Could not edit escaped message: {e}")
+
         # ── Post results immediately ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
@@ -3169,14 +3187,22 @@ class EncountersCog(commands.Cog):
         all_waves_done = state.wave_index >= state.total_waves
         defeated = all_waves_done or not state.alive
         color = 0xff0000 if state.is_boss and defeated else (0xff4444 if defeated else 0x888888)
+        ESCAPE_MSGS = [
+            "🏃 The MONSTRs said 'not today' and bounced.",
+            "😤 They survived. They'll be back. And they're mad.",
+            "🌀 The MONSTRs dissolved into the GOO. Cowards.",
+            "💨 Gone. Just a faint whiff of $GOO left behind.",
+            "🙈 They ran so fast they left their companion behind.",
+        ]
+        import random as _r
         if state.is_boss:
-            title = f"💀 BOSS {state.monstr['name']} DEFEATED!" if defeated else f"⏰ Boss escaped!"
+            title = f"💀 BOSS {state.monstr['name']} DEFEATED!" if defeated else f"⏰ Boss escaped... embarrassing."
         elif all_waves_done:
             title = f"💀 All {state.total_waves} MONSTRs defeated!"
         elif defeated:
             title = f"💀 Wave {state.wave_num} cleared!"
         else:
-            title = f"⏰ MONSTRs escaped!"
+            title = _r.choice(ESCAPE_MSGS)
 
         sorted_payouts = sorted(payouts.items(), key=lambda x: x[1], reverse=True)
         medals = ["🥇", "🥈", "🥉"]
