@@ -2816,7 +2816,7 @@ class TeammateSelect(discord.ui.UserSelect):
 
 class AttackButton(discord.ui.Button):
     def __init__(self, attack_type: int):
-        label, emoji, min_d, max_d = ATTACK_OPTIONS[attack_type]
+        label, emoji, min_d, max_d, _ = ATTACK_OPTIONS[attack_type]
         super().__init__(
             label=f"{emoji} {label}",
             style=discord.ButtonStyle.danger if attack_type == 2 else (
