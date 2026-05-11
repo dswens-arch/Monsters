@@ -2333,12 +2333,18 @@ ENCOUNTER_DURATION = 600   # 10 minutes total for all waves
 CRIT_CHANCE        = 0.05  # 5%
 WAVE_COUNT         = 3     # MONSTRs per encounter (boss = 1)
 
-# Attack options — (label, emoji, min_dmg, max_dmg)
+# Attack options — (label, emoji, min_dmg, max_dmg, counter_chance)
 ATTACK_OPTIONS = [
-    ("Zap",        "⚡", 30,  80),
-    ("Blaze",      "🔥", 60,  120),
-    ("Obliterate", "💀", 20,  200),
+    ("Zap",        "⚡", 30,  80,  0.10),  # 10% counter chance
+    ("Blaze",      "🔥", 60,  120, 0.15),  # 15% counter chance
+    ("Obliterate", "💀", 20,  200, 0.25),  # 25% counter chance — riskier
 ]
+
+# Counter-attack config
+COUNTER_BASE_CHANCE  = 0.15   # base chance per wave
+COUNTER_WAVE_SCALING = 0.05   # +5% per wave (wave 2 = 20%, wave 3 = 25%)
+COUNTER_COOLDOWN     = 45     # seconds when stunned
+BASE_COOLDOWN        = 15     # normal cooldown
 
 
 # ─────────────────────────────────────────────
@@ -2363,9 +2369,10 @@ class EncounterState:
         self.crit_count:    int = 0
 
         # Per-wave tracking (reset on each new wave)
-        self.first_striker: int | None = None
-        self.kill_shotter:  int | None = None
-        self.wave_kills:    list[int | None] = []  # kill shotter per wave
+        self.first_striker:       int | None = None
+        self.kill_shotter:        int | None = None
+        self.wave_kills:          list[int | None] = []  # kill shotter per wave
+        self.wave_first_strikers: list[int | None] = []  # first striker per wave
 
         # Init first wave
         self._init_wave()
@@ -2375,14 +2382,12 @@ class EncounterState:
         self.hp     = m["max_hp"]
         self.max_hp = m["max_hp"]
         self.alive  = True
-        if self.wave_index == 0:
-            self.first_striker = None
-        # Kill shotter resets per wave
-        self.kill_shotter = None
+        # Reset per-wave trackers
+        self.kill_shotter  = None
+        self.first_striker = None  # resets each wave so every wave has a first strike bonus
 
     @property
     def monstr(self):
-        # Clamp to last MONSTR so close sequence doesn't crash after all waves done
         idx = min(self.wave_index, len(self.monstrs) - 1)
         return self.monstrs[idx]
 
@@ -2396,7 +2401,9 @@ class EncounterState:
 
     def next_wave(self) -> bool:
         """Advance to next wave. Returns True if there is one, False if encounter over."""
+        # Save this wave's bonuses before resetting
         self.wave_kills.append(self.kill_shotter)
+        self.wave_first_strikers.append(self.first_striker)
         self.wave_index += 1
         if self.wave_index >= len(self.monstrs):
             return False
@@ -2409,11 +2416,15 @@ class EncounterState:
             return {"error": "encounter_over"}
 
         is_crit = random.random() < CRIT_CHANCE
-        _, _, min_dmg, max_dmg = ATTACK_OPTIONS[attack_type]
+        _, _, min_dmg, max_dmg, counter_chance = ATTACK_OPTIONS[attack_type]
         base_damage = random.randint(min_dmg, max_dmg)
         damage = base_damage * (2 if is_crit else 1)
         if self.is_boss:
-            damage = int(damage * BOSS_MULTIPLIER * 0.6)  # scaled for boss HP
+            damage = int(damage * BOSS_MULTIPLIER * 0.6)
+
+        # Counter-attack check — scales with wave number
+        wave_counter_chance = counter_chance + (self.wave_index * COUNTER_WAVE_SCALING)
+        is_counter = random.random() < wave_counter_chance and self.hp > 0
 
         events = []
         if self.first_striker is None:
@@ -2447,11 +2458,12 @@ class EncounterState:
             events.append("kill_shot")
 
         return {
-            "damage": damage,
+            "damage":       damage,
             "hp_remaining": self.hp,
-            "max_hp": self.max_hp,
-            "events": events,
-            "is_crit": is_crit,
+            "max_hp":       self.max_hp,
+            "events":       events,
+            "is_crit":      is_crit,
+            "is_counter":   is_counter,
         }
 
     def calculate_payouts(self) -> dict[int, int]:
@@ -2476,11 +2488,19 @@ class EncounterState:
                 share = int((dmg / total_damage) * damage_pool)
                 payouts[uid] = payouts.get(uid, 0) + share
 
-        if self.first_striker and self.first_striker in self.damage_dealt:
-            payouts[self.first_striker] = payouts.get(self.first_striker, 0) + first_bonus
+        # Award first strike bonus per wave (wave_kills tracks completed waves,
+        # current wave first_striker is still in self.first_striker)
+        # Collect all wave first strikers — stored in wave_first_strikers list
+        all_first_strikers = list(self.wave_first_strikers) + ([self.first_striker] if self.first_striker else [])
+        for fs in set(all_first_strikers):
+            if fs and fs in self.damage_dealt:
+                payouts[fs] = payouts.get(fs, 0) + first_bonus
 
-        if self.kill_shotter and self.kill_shotter in self.damage_dealt:
-            payouts[self.kill_shotter] = payouts.get(self.kill_shotter, 0) + kill_bonus
+        # Award kill shot bonus per wave
+        all_kill_shotters = list(self.wave_kills) + ([self.kill_shotter] if self.kill_shotter else [])
+        for ks in set(all_kill_shotters):
+            if ks and ks in self.damage_dealt:
+                payouts[ks] = payouts.get(ks, 0) + kill_bonus
 
         if valid_team_pairs:
             team_members: set[int] = set()
@@ -2563,23 +2583,34 @@ def _week_start() -> str:
 
 async def payout_all(state: EncounterState, payouts: dict[int, int], channel: discord.TextChannel):
     """
-    Instant version — just credits GOO balances in Supabase.
+    Instant — credits GOO balances in Supabase via batch upsert.
     Background sender loop handles actual on-chain transfers.
     """
     db = get_supabase()
-    for uid, amount in payouts.items():
-        if amount <= 0:
-            continue
-        try:
-            existing = db.table("goo_balances").select("balance").eq("user_id", str(uid)).execute()
-            if existing.data:
-                new_bal = existing.data[0]["balance"] + amount
-                db.table("goo_balances").update({"balance": new_bal, "needs_payout": True}).eq("user_id", str(uid)).execute()
-            else:
-                db.table("goo_balances").insert({"user_id": str(uid), "balance": amount, "needs_payout": True}).execute()
-            print(f"[PAYOUT] Credited {amount} GOO to {uid}")
-        except Exception as e:
-            print(f"[PAYOUT] Credit failed for {uid}: {e}")
+    try:
+        # Fetch all existing balances in one query
+        user_ids = [str(uid) for uid, amt in payouts.items() if amt > 0]
+        existing = db.table("goo_balances").select("user_id,balance").in_("user_id", user_ids).execute()
+        existing_map = {r["user_id"]: r["balance"] for r in existing.data}
+
+        # Build upsert rows
+        rows = []
+        for uid, amount in payouts.items():
+            if amount <= 0:
+                continue
+            prev = existing_map.get(str(uid), 0)
+            rows.append({
+                "user_id":      str(uid),
+                "balance":      prev + amount,
+                "needs_payout": True,
+                "updated_at":   datetime.now(timezone.utc).isoformat(),
+            })
+
+        if rows:
+            db.table("goo_balances").upsert(rows, on_conflict="user_id").execute()
+            print(f"[PAYOUT] Credited {len(rows)} balances: { {r['user_id'][:8]: r['balance'] for r in rows} }")
+    except Exception as e:
+        print(f"[PAYOUT] Batch credit failed: {e}")
 
 
 def _add_pending(db, user_id: str, amount: int):
@@ -2842,7 +2873,7 @@ class EncountersCog(commands.Cog):
         self.encounter_message: discord.Message | None = None
         self._next_encounters: dict = {}
         self._pending_boss: bool = False
-        self._attack_cooldowns: dict[int, float] = {}  # user_id → last attack timestamp
+        self._attack_cooldowns: dict[int, tuple] = {}  # user_id → (last_attack_time, stun_until)
         self._last_embed_update: float = 0.0  # timestamp of last embed edit
         self.encounter_scheduler.start()
         self.goo_sender.start()
@@ -3135,13 +3166,17 @@ class EncountersCog(commands.Cog):
         return embed
 
     def _build_results_embed(self, state: EncounterState, payouts: dict[int, int]) -> discord.Embed:
-        defeated = not state.alive
+        all_waves_done = state.wave_index >= state.total_waves
+        defeated = all_waves_done or not state.alive
         color = 0xff0000 if state.is_boss and defeated else (0xff4444 if defeated else 0x888888)
-        title = (
-            f"💀 BOSS {state.monstr['name']} DEFEATED!" if state.is_boss and defeated
-            else f"💀 {state.monstr['name']} was defeated!" if defeated
-            else f"⏰ {state.monstr['name']} escaped!"
-        )
+        if state.is_boss:
+            title = f"💀 BOSS {state.monstr['name']} DEFEATED!" if defeated else f"⏰ Boss escaped!"
+        elif all_waves_done:
+            title = f"💀 All {state.total_waves} MONSTRs defeated!"
+        elif defeated:
+            title = f"💀 Wave {state.wave_num} cleared!"
+        else:
+            title = f"⏰ MONSTRs escaped!"
 
         sorted_payouts = sorted(payouts.items(), key=lambda x: x[1], reverse=True)
         medals = ["🥇", "🥈", "🥉"]
@@ -3151,12 +3186,27 @@ class EncountersCog(commands.Cog):
             dmg = state.damage_dealt.get(uid, 0)
             lines.append(f"{medal} <@{uid}> — **{goo:,} $GOO** ({dmg} dmg)")
 
-        if state.first_striker:
-            lines.append(f"\n⚡ First Strike: <@{state.first_striker}>")
-        if state.kill_shotter:
-            lines.append(f"💥 Kill Shot: <@{state.kill_shotter}>")
+        # Show all wave first strikers and kill shotters
+        all_fs = list(state.wave_first_strikers) + ([state.first_striker] if state.first_striker else [])
+        all_ks = list(state.wave_kills) + ([state.kill_shotter] if state.kill_shotter else [])
+        seen_fs = set()
+        seen_ks = set()
+        fs_lines = []
+        ks_lines = []
+        for fs in all_fs:
+            if fs and fs not in seen_fs:
+                fs_lines.append(f"<@{fs}>")
+                seen_fs.add(fs)
+        for ks in all_ks:
+            if ks and ks not in seen_ks:
+                ks_lines.append(f"<@{ks}>")
+                seen_ks.add(ks)
+        if fs_lines:
+            lines.append(f"\n⚡ First Strike: {', '.join(fs_lines)}")
+        if ks_lines:
+            lines.append(f"💥 Kill Shot: {', '.join(ks_lines)}")
         if state.crit_count:
-            lines.append(f"🎯 Critical hits this encounter: **{state.crit_count}**")
+            lines.append(f"🎯 Critical hits: **{state.crit_count}**")
 
         embed = discord.Embed(
             title=title,
@@ -3219,18 +3269,26 @@ class EncountersCog(commands.Cog):
 
         user_id = interaction.user.id
 
-        # 15 second cooldown check
+        # Cooldown check — base 15s, extended to 45s if stunned by counter-attack
         import time
         now = time.time()
-        last = self._attack_cooldowns.get(user_id, 0)
-        remaining = 15 - (now - last)
+        cooldown_data = self._attack_cooldowns.get(user_id, (0, 0))
+        last, stun_until = cooldown_data if isinstance(cooldown_data, tuple) else (cooldown_data, 0)
+        if now < stun_until:
+            remaining = stun_until - now
+            await interaction.response.send_message(
+                f"😵 **You've been counter-attacked!** Stunned for **{remaining:.0f}s** more...",
+                ephemeral=True
+            )
+            return
+        remaining = BASE_COOLDOWN - (now - last)
         if remaining > 0:
             await interaction.response.send_message(
                 f"⏳ You can attack again in **{remaining:.0f}s**!",
                 ephemeral=True
             )
             return
-        self._attack_cooldowns[user_id] = now
+        self._attack_cooldowns[user_id] = (now, 0)
 
         result = state.register_attack(user_id, tagged_id, attack_type=attack_type)
 
@@ -3242,35 +3300,54 @@ class EncountersCog(commands.Cog):
         lines = []
 
         # Ephemeral damage feedback
+        attack_name = ATTACK_OPTIONS[attack_type][0]
+        attack_emoji = ATTACK_OPTIONS[attack_type][1]
         if result["is_crit"]:
-            lines.append(f"⚡ **CRITICAL HIT!** You dealt **{result['damage']} damage!**")
+            lines.append(f"⚡ **CRITICAL HIT!** {attack_emoji} {attack_name} dealt **{result['damage']} damage!**")
         else:
-            lines.append(f"💥 You dealt **{result['damage']} damage!**")
+            lines.append(f"{attack_emoji} **{attack_name}** dealt **{result['damage']} damage!**")
 
         lines.append(self._hp_bar(result["hp_remaining"], result["max_hp"]))
 
+        # XP / stats display
         total_dmg = state.damage_dealt.get(user_id, 0)
-        lines.append(f"📊 Your total damage this encounter: **{total_dmg}**")
+        total_damage_all = sum(state.damage_dealt.values())
+        my_share_pct = int((total_dmg / total_damage_all) * 100) if total_damage_all > 0 else 0
+        goo_total = TOTAL_GOO * (BOSS_MULTIPLIER if state.is_boss else 1)
+        est_goo = int((total_dmg / total_damage_all) * (goo_total * 0.6)) if total_damage_all > 0 else 0
+        rank = sorted(state.damage_dealt.values(), reverse=True).index(total_dmg) + 1
+        lines.append(
+            f"\n📊 **Your stats:** {total_dmg} dmg ({my_share_pct}% of total) · "
+            f"#{rank} on board · ~{est_goo:,} $GOO so far"
+        )
+        lines.append(f"⚔️ Wave {state.wave_num}/{state.total_waves}")
 
         if "first_strike" in events:
-            lines.append("🥊 **First Strike!** Bonus GOO incoming.")
+            lines.append("🥊 **First Strike!** +500 GOO bonus.")
         if "kill_shot" in events:
-            lines.append("💀 **Kill Shot landed!** Bonus incoming — check results.")
+            lines.append("💀 **Kill Shot landed!** Bonus incoming.")
         if tagged_name:
-            lines.append(f"🤝 Teamed up with **{tagged_name}**! You both get a bonus.")
+            lines.append(f"🤝 Teamed up with **{tagged_name}**!")
+
+        # Counter-attack — apply stun if triggered
+        if result.get("is_counter") and state.alive:
+            import time as _ctime
+            stun_end = _ctime.time() + COUNTER_COOLDOWN
+            self._attack_cooldowns[user_id] = (_ctime.time(), stun_end)
+            lines.append(f"\n💢 **COUNTER-ATTACK!** {state.monstr['name']} strikes back — you're stunned for {COUNTER_COOLDOWN}s!")
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
         # Public announcements for hype moments
         channel = interaction.channel
         if "first_strike" in events:
-            await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood!")
+            await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
-        if "kill_shot" in events:
-            # Don't announce kill shot here — wait for close sequence
-            # which has the correct final kill shot assignment
-            pass
+        if result.get("is_counter") and state.alive:
+            await channel.send(
+                f"💢 **{state.monstr['name']} COUNTER-ATTACKS!** <@{user_id}> is stunned for {COUNTER_COOLDOWN} seconds!"
+            )
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
