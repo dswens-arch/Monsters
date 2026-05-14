@@ -3305,6 +3305,17 @@ class EncountersCog(commands.Cog):
 
     async def _post_wave_embed(self, channel: discord.TextChannel, prefix: str):
         """Post or update the encounter embed for a new wave."""
+        # Disable buttons on the previous wave's message before posting the new one
+        if self.encounter_message:
+            try:
+                disabled_view = discord.ui.View()
+                for item in self._build_attack_view().children:
+                    item.disabled = True
+                    disabled_view.add_item(item)
+                await self.encounter_message.edit(view=disabled_view)
+            except Exception as e:
+                print(f"[WAVE] Could not disable old wave buttons: {e}")
+
         state = self.active_encounter
         embed = self._build_encounter_embed(state)
         view = self._build_attack_view()
@@ -3363,6 +3374,18 @@ class EncountersCog(commands.Cog):
             )
             return
         self._attack_cooldowns[user_id] = (now, 0)
+
+        # Guard against attacks from a previous wave's message buttons
+        if (
+            self.encounter_message
+            and hasattr(interaction, "message")
+            and interaction.message
+            and interaction.message.id != self.encounter_message.id
+        ):
+            await interaction.response.send_message(
+                "⚔️ That wave is already over — attack the current MONSTR!", ephemeral=True
+            )
+            return
 
         result = state.register_attack(user_id, tagged_id, attack_type=attack_type)
 
