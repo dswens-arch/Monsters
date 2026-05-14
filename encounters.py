@@ -3866,6 +3866,86 @@ class TeamsCog(commands.Cog):
             print(f"[ERROR] rank: {e}")
             await interaction.followup.send("Couldn't fetch your rank right now.", ephemeral=True)
 
+    # ── /info ─────────────────────────────────
+
+    @discord.app_commands.command(
+        name="info",
+        description="List all available $GOO Warden bot commands"
+    )
+    async def info(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        embed = discord.Embed(
+            title="🧟 $GOO Warden — Command List",
+            description="Everything you can do with the MONSTRS Encounters bot.",
+            color=0x9b59b6,
+        )
+
+        embed.add_field(name="​", value="**⚔️ Encounters**", inline=False)
+        embed.add_field(
+            name="`/leaderboard`",
+            value="View weekly or all-time encounter stats — damage, kill shots, and participation.",
+            inline=False
+        )
+        embed.add_field(
+            name="`/stats`",
+            value="View your personal all-time encounter stats.",
+            inline=False
+        )
+
+        embed.add_field(name="​", value="**🧟 Teams & Battle Points**", inline=False)
+        embed.add_field(
+            name="`/team_setup`",
+            value="Create or update your team — set your name and choose an avatar MONSTR by ASA ID.",
+            inline=False
+        )
+        embed.add_field(
+            name="`/rank`",
+            value="View your team card — BP, tier, streak, wins, holdings count, attack bonus, and stun resist.",
+            inline=False
+        )
+        embed.add_field(
+            name="`/bp_leaderboard`",
+            value="Top 10 teams on the server ranked by Battle Points.",
+            inline=False
+        )
+
+        embed.add_field(name="​", value="**💧 $GOO & Wallet**", inline=False)
+        embed.add_field(
+            name="`/link`",
+            value="Link your Algorand wallet to receive $GOO rewards from encounters.",
+            inline=False
+        )
+        embed.add_field(
+            name="`/balance`",
+            value="Check your current $GOO balance and any pending rewards.",
+            inline=False
+        )
+
+        embed.add_field(name="​", value="**📊 BP Tier System**", inline=False)
+        embed.add_field(
+            name="Tiers",
+            value=(
+                "🥚 Raw — 0 BP\n"
+                "🔰 Scrapper — 150 BP  •  +5% atk  •  10% stun resist\n"
+                "⚔️ Fighter — 400 BP  •  +10% atk  •  20% stun resist\n"
+                "🔥 Veteran — 900 BP  •  +18% atk  •  32% stun resist\n"
+                "💀 Warlord — 2,000 BP  •  +28% atk  •  45% stun resist"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Holdings Multiplier",
+            value=(
+                "1–5 MONSTRs: 1.0x BP\n"
+                "6–14: 1.25x  •  15–24: 1.5x  •  25–49: 1.75x  •  50+: 2.0x"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text="BP never resets • Hold more MONSTRs to earn faster")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     # ── /bp_leaderboard ───────────────────────
 
     @discord.app_commands.command(
