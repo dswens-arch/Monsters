@@ -46,6 +46,12 @@ import discord
 from discord.ext import commands, tasks
 from supabase import create_client, Client
 
+from monstr_teams import (
+    award_bp, roll_stun_resist, get_atk_multiplier,
+    get_or_create_team, get_team, resolve_tier, next_tier_info,
+    fetch_avatar_url, fetch_monstr_holdings, TIERS,
+)
+
 
 # ─────────────────────────────────────────────
 # SUPABASE
@@ -2418,7 +2424,8 @@ class EncounterState:
         is_crit = random.random() < CRIT_CHANCE
         _, _, min_dmg, max_dmg, counter_chance = ATTACK_OPTIONS[attack_type]
         base_damage = random.randint(min_dmg, max_dmg)
-        damage = base_damage * (2 if is_crit else 1)
+        atk_mult = get_atk_multiplier(str(user_id))
+        damage = int(base_damage * atk_mult * (2 if is_crit else 1))
         if self.is_boss:
             damage = int(damage * BOSS_MULTIPLIER * 0.6)
 
@@ -3127,6 +3134,47 @@ class EncountersCog(commands.Cog):
             for uid, milestones in milestone_tasks:
                 await announce_milestones(self.bot, channel, uid, milestones)
 
+            # ── Award BP to teams ──
+            try:
+                db_bp = get_supabase()
+                # Fetch all linked wallets for attackers in one pass
+                attacker_ids = [str(uid) for uid in state.damage_dealt]
+                wallet_rows  = db_bp.table("linked_wallets").select("user_id,wallet_address").in_("user_id", attacker_ids).execute()
+                wallet_map   = {r["user_id"]: r["wallet_address"] for r in wallet_rows.data}
+
+                for uid, dmg in state.damage_dealt.items():
+                    got_kill = uid == state.kill_shotter
+                    crits    = state.crit_counts.get(uid, 0)
+
+                    # Live holdings count for BP multiplier
+                    wallet = wallet_map.get(str(uid))
+                    holdings = 0
+                    if wallet:
+                        try:
+                            holdings = await asyncio.wait_for(
+                                asyncio.to_thread(fetch_monstr_holdings, wallet),
+                                timeout=8
+                            )
+                        except Exception:
+                            holdings = 0
+
+                    bp_earned, old_tier, new_tier = award_bp(
+                        str(uid),
+                        participated=True,
+                        got_kill_shot=got_kill,
+                        crits=crits,
+                        is_boss=state.is_boss,
+                        holdings=holdings,
+                    )
+                    if old_tier != new_tier:
+                        label = next(t[1] for t in TIERS if t[0] == new_tier)
+                        await channel.send(
+                            f"⚡ <@{uid}> **TIER UP!** Your team just reached **{label}**! "
+                            f"Attack power and stun resistance increased."
+                        )
+            except Exception as e:
+                print(f"[ERROR] BP award: {e}")
+
             print("[CLOSE] Encounter fully closed")
 
         asyncio.create_task(_background_tasks())
@@ -3355,12 +3403,15 @@ class EncountersCog(commands.Cog):
         if tagged_name:
             lines.append(f"🤝 Teamed up with **{tagged_name}**!")
 
-        # Counter-attack — apply stun if triggered
+        # Counter-attack — apply stun if triggered (stun resist can block it)
         if result.get("is_counter") and state.alive:
             import time as _ctime
-            stun_end = _ctime.time() + COUNTER_COOLDOWN
-            self._attack_cooldowns[user_id] = (_ctime.time(), stun_end)
-            lines.append(f"\n💢 **COUNTER-ATTACK!** {state.monstr['name']} strikes back — you're stunned for {COUNTER_COOLDOWN}s!")
+            if roll_stun_resist(user_id):
+                lines.append(f"\n🛡️ **Counter-attack blocked!** Your team's experience shrugged it off!")
+            else:
+                stun_end = _ctime.time() + COUNTER_COOLDOWN
+                self._attack_cooldowns[user_id] = (_ctime.time(), stun_end)
+                lines.append(f"\n💢 **COUNTER-ATTACK!** {state.monstr['name']} strikes back — you're stunned for {COUNTER_COOLDOWN}s!")
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -3618,9 +3669,234 @@ class WalletCog(commands.Cog):
 
 
 # ─────────────────────────────────────────────
+# TEAMS COG
+# ─────────────────────────────────────────────
+
+class TeamsCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    # ── /team_setup ──────────────────────────
+
+    @discord.app_commands.command(
+        name="team_setup",
+        description="Create or update your MONSTR team name and avatar"
+    )
+    @discord.app_commands.describe(
+        team_name="Your team name (e.g. 'The Rot Squad')",
+        avatar_asa="ASA ID of your favourite MONSTR (e.g. 3294386711)",
+    )
+    async def team_setup(
+        self,
+        interaction: discord.Interaction,
+        team_name: str,
+        avatar_asa: str,
+    ):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            db = get_supabase()
+            user_id = str(interaction.user.id)
+
+            if len(team_name.strip()) < 2 or len(team_name.strip()) > 32:
+                await interaction.followup.send(
+                    "⚠️ Team name must be between 2 and 32 characters.", ephemeral=True
+                )
+                return
+
+            avatar_asa = avatar_asa.strip()
+            if not avatar_asa.isdigit():
+                await interaction.followup.send(
+                    "⚠️ ASA ID must be a number (e.g. `3294386711`).", ephemeral=True
+                )
+                return
+
+            await interaction.followup.send(
+                "🔍 Fetching your MONSTR image — one moment...", ephemeral=True
+            )
+
+            image_url = await asyncio.to_thread(fetch_avatar_url, avatar_asa)
+
+            get_or_create_team(db, user_id)
+            db.table("monstr_teams").update({
+                "team_name":        team_name.strip(),
+                "avatar_asa_id":    avatar_asa,
+                "avatar_image_url": image_url or "",
+                "updated_at":       datetime.now(timezone.utc).isoformat(),
+            }).eq("user_id", user_id).execute()
+
+            team = get_team(db, user_id)
+            _, tier_label, _, _ = resolve_tier(team.get("total_bp", 0))
+
+            embed = discord.Embed(
+                title="✅ Team Updated!",
+                description=(
+                    f"**{team_name.strip()}**\n"
+                    f"Tier: {tier_label}\n"
+                    f"Avatar MONSTR: ASA `{avatar_asa}`"
+                ),
+                color=0x00ff99,
+            )
+            if image_url:
+                embed.set_thumbnail(url=image_url)
+            else:
+                embed.set_footer(text="⚠️ Couldn't load image — avatar will appear when available.")
+
+            await interaction.edit_original_response(content=None, embed=embed)
+
+        except Exception as e:
+            print(f"[ERROR] team_setup: {e}")
+            await interaction.followup.send("Something went wrong. Try again.", ephemeral=True)
+
+    # ── /rank ─────────────────────────────────
+
+    @discord.app_commands.command(
+        name="rank",
+        description="View your MONSTR team's Battle Points rank"
+    )
+    async def rank(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            db = get_supabase()
+            user_id = str(interaction.user.id)
+
+            team = get_team(db, user_id)
+
+            # Live holdings count (needed for both registered and unregistered)
+            wallet_row = db.table("linked_wallets").select("wallet_address").eq("user_id", user_id).execute()
+            holdings = 0
+            if wallet_row.data:
+                wallet = wallet_row.data[0]["wallet_address"]
+                holdings = await asyncio.to_thread(fetch_monstr_holdings, wallet)
+
+            from monstr_teams import get_holdings_multiplier, HOLDINGS_MULTIPLIERS
+            holdings_mult = get_holdings_multiplier(holdings)
+            next_holdings_tier = next(
+                (f"{mult}x BP at {threshold}+ MONSTRs" for threshold, mult in reversed(HOLDINGS_MULTIPLIERS) if holdings < threshold),
+                None
+            )
+
+            # Unregistered — show banked BP nudge
+            if not team or not team.get("team_name"):
+                bp = team.get("total_bp", 0) if team else 0
+                _, tier_label, _, _ = resolve_tier(bp)
+                embed = discord.Embed(
+                    title="🧟 You don't have a team name yet!",
+                    description=(
+                        f"You have **{bp:,} BP** banked from your encounters so far.\n\n"
+                        f"Use `/team_setup` to claim your name, pick your avatar MONSTR, "
+                        f"and appear on the `/bp_leaderboard`."
+                    ),
+                    color=0xf39c12,
+                )
+                embed.add_field(name="⚡ Banked BP",       value=f"**{bp:,}**  •  {tier_label}",                     inline=True)
+                embed.add_field(name="📦 MONSTR Holdings", value=f"**{holdings}**  •  **{holdings_mult}x** BP mult", inline=True)
+                if next_holdings_tier:
+                    embed.set_footer(text=f"Hold more MONSTRs to earn BP faster — {next_holdings_tier}")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            bp = team.get("total_bp", 0)
+            tier_key, tier_label, atk_mult, stun_resist = resolve_tier(bp)
+            next_info = next_tier_info(tier_key)
+
+            # Rank position
+            all_teams = db.table("monstr_teams").select("user_id,total_bp").order("total_bp", desc=True).execute()
+            rank_pos = next(
+                (i + 1 for i, t in enumerate(all_teams.data) if t["user_id"] == user_id),
+                len(all_teams.data)
+            )
+
+            team_name  = team.get("team_name") or "Unnamed Team"
+            streak     = team.get("streak_days", 0)
+            wins       = team.get("encounters_won", 0)
+            played     = team.get("encounters_played", 0)
+            avatar_url = team.get("avatar_image_url", "")
+
+            if next_info:
+                next_label, next_bp = next_info
+                progress_line = f"{next_bp - bp:,} BP to {next_label}"
+            else:
+                progress_line = "Max tier reached 🏆"
+
+            footer_parts = [progress_line]
+            if next_holdings_tier:
+                footer_parts.append(next_holdings_tier)
+
+            embed = discord.Embed(title=f"🧟 {team_name}", color=0x9b59b6)
+            embed.add_field(name="🏆 Rank",            value=f"**#{rank_pos}**",                          inline=True)
+            embed.add_field(name="⚡ Battle Points",   value=f"**{bp:,} BP**  •  {tier_label}",           inline=True)
+            embed.add_field(name="\u200b",              value="\u200b",                                    inline=True)
+            embed.add_field(name="🔥 Daily streak",    value=f"**{streak} day{'s' if streak != 1 else ''}**", inline=True)
+            embed.add_field(name="⚔️ Total wins",      value=f"**{wins}**",                               inline=True)
+            embed.add_field(name="🎮 Total played",    value=f"**{played}**",                             inline=True)
+            embed.add_field(name="📦 MONSTR Holdings", value=f"**{holdings}**  •  **{holdings_mult}x** BP", inline=True)
+            embed.add_field(name="⚔️ Atk Bonus",       value=f"**+{int((atk_mult - 1) * 100)}%**",       inline=True)
+            embed.add_field(name="🛡️ Stun Resist",     value=f"**{stun_resist}%**",                      inline=True)
+            embed.set_footer(text="  •  ".join(footer_parts))
+
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            print(f"[ERROR] rank: {e}")
+            await interaction.followup.send("Couldn't fetch your rank right now.", ephemeral=True)
+
+    # ── /bp_leaderboard ───────────────────────
+
+    @discord.app_commands.command(
+        name="bp_leaderboard",
+        description="Top 10 MONSTR teams by Battle Points"
+    )
+    async def bp_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            db = get_supabase()
+
+            rows = (
+                db.table("monstr_teams")
+                .select("user_id,team_name,total_bp,tier")
+                .order("total_bp", desc=True)
+                .limit(10)
+                .execute()
+            )
+
+            if not rows.data:
+                await interaction.followup.send(
+                    "No teams registered yet! Use `/team_setup` to be first.", ephemeral=True
+                )
+                return
+
+            medals = ["🥇", "🥈", "🥉"]
+            lines  = []
+            for i, row in enumerate(rows.data):
+                medal      = medals[i] if i < 3 else f"**#{i + 1}**"
+                bp         = row.get("total_bp", 0)
+                _, tier_label, _, _ = resolve_tier(bp)
+                name       = row.get("team_name") or "Unnamed Team"
+                lines.append(
+                    f"{medal}  {name}  —  **{bp:,} BP**  •  {tier_label}  (<@{row['user_id']}>)"
+                )
+
+            embed = discord.Embed(
+                title="💀 MONSTR Battle Leaderboard",
+                description="\n".join(lines),
+                color=0xf1c40f,
+            )
+            embed.set_footer(text="BP earned through Encounters • /team_setup to join")
+            await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            print(f"[ERROR] bp_leaderboard: {e}")
+            await interaction.followup.send("Couldn't load the leaderboard right now.", ephemeral=True)
+
+
+# ─────────────────────────────────────────────
 # SETUP
 # ─────────────────────────────────────────────
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(EncountersCog(bot))
     await bot.add_cog(WalletCog(bot))
+    await bot.add_cog(TeamsCog(bot))
