@@ -235,52 +235,122 @@ def roll_stun_resist(user_id: str) -> bool:
 # AVATAR — live image fetch
 # ─────────────────────────────────────────────
 
-IPFS_GATEWAYS = [
-    "https://ipfs.algonode.xyz/ipfs/",
-    "https://cloudflare-ipfs.com/ipfs/",
-    "https://dweb.link/ipfs/",
-]
+IPFS_GATEWAY = "https://ipfs.algonode.xyz/ipfs/"
+
+
+def _decode_arc19_cid(reserve_address: str) -> str | None:
+    """
+    ARC-19: the reserve address encodes the IPFS CID as a base32 multihash
+    packed into a 32-byte Algorand public key.
+
+    Algorand addresses are base32(public_key + checksum) where checksum is
+    the last 4 bytes of sha512/256(b"appID" + public_key) — but for our
+    purposes we just need the raw 32-byte public key, which IS the CID bytes
+    (prefixed with the multihash varint 0x1220 for sha2-256).
+
+    Steps:
+      1. base32-decode the address (strip the 4-byte checksum)
+      2. prepend the CIDv1 multibase prefix and codec bytes
+      3. base32upper-encode to get the CIDv1 string
+    """
+    try:
+        import base64
+        # Algorand addresses use base32 without padding
+        padded = reserve_address + "=" * (-len(reserve_address) % 8)
+        raw = base64.b32decode(padded)
+        # raw = 32 bytes public key + 4 bytes checksum
+        pub_key = raw[:32]
+        # For ARC-19 with sha2-256: multihash prefix is   (sha2-256, 32 bytes)
+        multihash = b" " + pub_key
+        # CIDv1 with raw codec (0x55): U + multihash
+        cid_bytes = b"U" + multihash
+        # Encode as base32upper (no padding) — CIDv1 b32upper
+        cid_b32 = base64.b32encode(cid_bytes).decode().rstrip("=")
+        return cid_b32
+    except Exception as e:
+        print(f"[AVATAR] CID decode failed: {e}")
+        return None
+
+
+def _fetch_json(url: str, timeout: int = 8) -> dict | None:
+    """Fetch a URL and parse as JSON. Returns None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        print(f"[AVATAR] JSON fetch failed {url}: {e}")
+        return None
 
 
 def fetch_avatar_url(asa_id: str) -> str | None:
     """
-    Fetch latest image URL for a given MONSTR ASA ID via Algorand indexer.
-    Returns a gateway URL string, or None on failure.
+    Fetch the image URL for a MONSTR ASA.
+
+    Handles:
+      - ARC-19  (template-ipfs://...)  — decode reserve → fetch metadata JSON → image field
+      - ARC-3   (ipfs://...)           — fetch metadata JSON → image field
+      - Direct  (https://...)          — return as-is
     """
     try:
         indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
-        url = f"{indexer_url}/v2/assets/{asa_id}"
-        req = urllib.request.Request(url, headers={
+        asset_url   = f"{indexer_url}/v2/assets/{asa_id}"
+        req = urllib.request.Request(asset_url, headers={
             "User-Agent": "Mozilla/5.0",
             "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
         })
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
 
-        params = data.get("asset", {}).get("params", {})
-
-        # ARC-19: reserve field holds IPFS CID
-        reserve = params.get("reserve", "")
+        params    = data.get("asset", {}).get("params", {})
         url_field = params.get("url", "")
+        reserve   = params.get("reserve", "")
 
-        # Try ARC-19 CID from reserve address
-        if reserve:
-            # Reserve encodes the CID as a base32 multihash for ARC-19
-            # We use the url field which may have ipfs://... or template-ipfs://...
-            pass
+        print(f"[AVATAR] ASA {asa_id} url={url_field!r} reserve={reserve[:12] if reserve else ''}...")
 
-        # Try url field — may be ipfs://<hash> or https:// directly
-        if url_field.startswith("ipfs://"):
-            cid = url_field.replace("ipfs://", "").split("#")[0]
-            return f"{IPFS_GATEWAYS[0]}{cid}"
+        # ── ARC-19: template-ipfs:// — metadata CID encoded in reserve address ──
+        if url_field.startswith("template-ipfs://"):
+            if not reserve:
+                print(f"[AVATAR] ARC-19 but no reserve address for {asa_id}")
+                return None
+            cid = _decode_arc19_cid(reserve)
+            if not cid:
+                return None
+            meta_url  = f"{IPFS_GATEWAY}{cid}"
+            print(f"[AVATAR] ARC-19 metadata URL: {meta_url}")
+            meta = _fetch_json(meta_url)
+            if not meta:
+                return None
+            image = meta.get("image", "")
+            if image.startswith("ipfs://"):
+                image_cid = image.replace("ipfs://", "").split("?")[0]
+                return f"{IPFS_GATEWAY}{image_cid}"
+            elif image.startswith("https://"):
+                return image
+            print(f"[AVATAR] Unrecognised image field in ARC-19 metadata: {image!r}")
+            return None
+
+        # ── ARC-3: ipfs:// pointing directly to metadata JSON ──
+        elif url_field.startswith("ipfs://"):
+            cid      = url_field.replace("ipfs://", "").split("#")[0].split("?")[0]
+            meta_url = f"{IPFS_GATEWAY}{cid}"
+            print(f"[AVATAR] ARC-3 metadata URL: {meta_url}")
+            meta = _fetch_json(meta_url)
+            if meta:
+                image = meta.get("image", "")
+                if image.startswith("ipfs://"):
+                    image_cid = image.replace("ipfs://", "").split("?")[0]
+                    return f"{IPFS_GATEWAY}{image_cid}"
+                elif image.startswith("https://"):
+                    return image
+            # Fall back: try the CID itself as the image
+            return meta_url
+
+        # ── Direct HTTPS URL ──
         elif url_field.startswith("https://"):
             return url_field
-        elif url_field.startswith("template-ipfs://"):
-            # ARC-19: CID is encoded in reserve address as pubkey of a zero-balance account
-            # Use algonode ARC19 endpoint as shortcut
-            return f"https://ipfs.algonode.xyz/ipfs/{reserve}#arc3"
 
-        print(f"[AVATAR] No recognisable image URL for ASA {asa_id}")
+        print(f"[AVATAR] No recognisable URL for ASA {asa_id}: {url_field!r}")
         return None
 
     except Exception as e:
