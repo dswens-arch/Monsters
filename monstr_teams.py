@@ -235,70 +235,66 @@ def roll_stun_resist(user_id: str) -> bool:
 # AVATAR — live image fetch
 # ─────────────────────────────────────────────
 
-IPFS_GATEWAY = "https://ipfs.algonode.xyz/ipfs/"
+# Gateways tried in order — first success wins
+IPFS_GATEWAYS = [
+    "https://gateway.pinata.cloud/ipfs/",
+    "https://cloudflare-ipfs.com/ipfs/",
+    "https://dweb.link/ipfs/",
+    "https://ipfs.io/ipfs/",
+]
 
 
-def _decode_arc19_cid(reserve_address: str) -> str | None:
-    """
-    ARC-19: the reserve address encodes the IPFS CID as a base32 multihash
-    packed into a 32-byte Algorand public key.
-
-    Algorand addresses are base32(public_key + checksum) where checksum is
-    the last 4 bytes of sha512/256(b"appID" + public_key) — but for our
-    purposes we just need the raw 32-byte public key, which IS the CID bytes
-    (prefixed with the multihash varint 0x1220 for sha2-256).
-
-    Steps:
-      1. base32-decode the address (strip the 4-byte checksum)
-      2. prepend the CIDv1 multibase prefix and codec bytes
-      3. base32upper-encode to get the CIDv1 string
-    """
+def _decode_arc19_cid(reserve_address, codec="dag-pb"):
     try:
         import base64
-        # Algorand addresses use base32 without padding
-        padded = reserve_address + "=" * (-len(reserve_address) % 8)
-        raw = base64.b32decode(padded)
-        # raw = 32 bytes public key + 4 bytes checksum
+        import base58 as _b58
+        padded  = reserve_address + "=" * (-len(reserve_address) % 8)
+        raw     = base64.b32decode(padded)
         pub_key = raw[:32]
-        # For ARC-19 with sha2-256: multihash prefix is   (sha2-256, 32 bytes)
-        multihash = b" " + pub_key
-        # CIDv1 with raw codec (0x55): U + multihash
-        cid_bytes = b"U" + multihash
-        # Encode as base32upper (no padding) — CIDv1 b32upper
-        cid_b32 = base64.b32encode(cid_bytes).decode().rstrip("=")
-        return cid_b32
+        multihash = b"\x12\x20" + pub_key
+        if codec == "dag-pb":
+            return _b58.b58encode(multihash).decode()
+        else:
+            cid_bytes = b"\x01\x55" + multihash
+            return base64.b32encode(cid_bytes).decode().rstrip("=")
     except Exception as e:
         print(f"[AVATAR] CID decode failed: {e}")
         return None
 
 
-def _fetch_json(url: str, timeout: int = 8) -> dict | None:
-    """Fetch a URL and parse as JSON. Returns None on failure."""
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        print(f"[AVATAR] JSON fetch failed {url}: {e}")
-        return None
+def _fetch_json_gateways(cid, timeout=8):
+    for gateway in IPFS_GATEWAYS:
+        url = f"{gateway}{cid}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read())
+                print(f"[AVATAR] Metadata OK from {gateway}")
+                return data
+        except Exception as e:
+            print(f"[AVATAR] Gateway {gateway} failed: {e}")
+    return None
 
 
-def fetch_avatar_url(asa_id: str) -> str | None:
-    """
-    Fetch the image URL for a MONSTR ASA.
+def _resolve_image_url(image_field):
+    if image_field.startswith("ipfs://"):
+        cid = image_field.replace("ipfs://", "").split("?")[0].split("#")[0]
+        return f"https://cloudflare-ipfs.com/ipfs/{cid}"
+    elif image_field.startswith("https://"):
+        return image_field
+    return None
 
-    Handles:
-      - ARC-19  (template-ipfs://...)  — decode reserve → fetch metadata JSON → image field
-      - ARC-3   (ipfs://...)           — fetch metadata JSON → image field
-      - Direct  (https://...)          — return as-is
-    """
+
+def fetch_avatar_url(asa_id):
     try:
         indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
-        asset_url   = f"{indexer_url}/v2/assets/{asa_id}"
-        req = urllib.request.Request(asset_url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
-        })
+        req = urllib.request.Request(
+            f"{indexer_url}/v2/assets/{asa_id}",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
+            }
+        )
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
 
@@ -306,47 +302,33 @@ def fetch_avatar_url(asa_id: str) -> str | None:
         url_field = params.get("url", "")
         reserve   = params.get("reserve", "")
 
-        print(f"[AVATAR] ASA {asa_id} url={url_field!r} reserve={reserve[:12] if reserve else ''}...")
+        print(f"[AVATAR] ASA {asa_id} url={url_field!r}")
 
-        # ── ARC-19: template-ipfs:// — metadata CID encoded in reserve address ──
         if url_field.startswith("template-ipfs://"):
+            codec = "raw" if ":1:raw:" in url_field else "dag-pb"
             if not reserve:
-                print(f"[AVATAR] ARC-19 but no reserve address for {asa_id}")
+                print(f"[AVATAR] ARC-19 but no reserve for ASA {asa_id}")
                 return None
-            cid = _decode_arc19_cid(reserve)
+            cid = _decode_arc19_cid(reserve, codec)
             if not cid:
                 return None
-            meta_url  = f"{IPFS_GATEWAY}{cid}"
-            print(f"[AVATAR] ARC-19 metadata URL: {meta_url}")
-            meta = _fetch_json(meta_url)
+            print(f"[AVATAR] ARC-19 CID ({codec}): {cid}")
+            meta = _fetch_json_gateways(cid)
             if not meta:
                 return None
-            image = meta.get("image", "")
-            if image.startswith("ipfs://"):
-                image_cid = image.replace("ipfs://", "").split("?")[0]
-                return f"{IPFS_GATEWAY}{image_cid}"
-            elif image.startswith("https://"):
-                return image
-            print(f"[AVATAR] Unrecognised image field in ARC-19 metadata: {image!r}")
-            return None
+            result = _resolve_image_url(meta.get("image", ""))
+            print(f"[AVATAR] Final image URL: {result}")
+            return result
 
-        # ── ARC-3: ipfs:// pointing directly to metadata JSON ──
         elif url_field.startswith("ipfs://"):
-            cid      = url_field.replace("ipfs://", "").split("#")[0].split("?")[0]
-            meta_url = f"{IPFS_GATEWAY}{cid}"
-            print(f"[AVATAR] ARC-3 metadata URL: {meta_url}")
-            meta = _fetch_json(meta_url)
+            cid  = url_field.replace("ipfs://", "").split("#")[0].split("?")[0]
+            meta = _fetch_json_gateways(cid)
             if meta:
-                image = meta.get("image", "")
-                if image.startswith("ipfs://"):
-                    image_cid = image.replace("ipfs://", "").split("?")[0]
-                    return f"{IPFS_GATEWAY}{image_cid}"
-                elif image.startswith("https://"):
-                    return image
-            # Fall back: try the CID itself as the image
-            return meta_url
+                result = _resolve_image_url(meta.get("image", ""))
+                if result:
+                    return result
+            return f"https://cloudflare-ipfs.com/ipfs/{cid}"
 
-        # ── Direct HTTPS URL ──
         elif url_field.startswith("https://"):
             return url_field
 
@@ -356,6 +338,7 @@ def fetch_avatar_url(asa_id: str) -> str | None:
     except Exception as e:
         print(f"[AVATAR] Fetch failed for ASA {asa_id}: {e}")
         return None
+
 
 
 # ─────────────────────────────────────────────
