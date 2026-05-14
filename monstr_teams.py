@@ -345,29 +345,62 @@ def fetch_avatar_url(asa_id):
 # HOLDINGS COUNT (live from chain)
 # ─────────────────────────────────────────────
 
-MONSTR_CREATOR_ADDRESS = os.getenv("MONSTR_CREATOR_ADDRESS", "")  # set in .env
+# Hardcoded creator address — no env var needed
+MONSTR_CREATOR_ADDRESS = "TBIHX5R5QWGWVD4FOL4SL62WXA3CBKRZEYONMOZWCIYGX6IGTQNMCV43BQ"
+
 
 def fetch_monstr_holdings(wallet_address: str) -> int:
     """
     Returns number of MONSTR NFTs held by wallet_address.
-    Counts assets whose creator matches MONSTR_CREATOR_ADDRESS.
-    Falls back to 0 on error.
+    Queries the indexer for all assets created by MONSTR_CREATOR_ADDRESS
+    that the wallet holds with amount > 0.
     """
     try:
         indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
-        url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false"
-        req = urllib.request.Request(url, headers={
+
+        # Paginate through all assets created by the MONSTRS creator address
+        monstr_ids = set()
+        next_token = None
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
+        }
+        while True:
+            url = (
+                f"{indexer_url}/v2/assets"
+                f"?creator={MONSTR_CREATOR_ADDRESS}"
+                f"&limit=1000"
+                f"&include-all=false"
+            )
+            if next_token:
+                url += f"&next={next_token}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                page = json.loads(r.read())
+            for a in page.get("assets", []):
+                monstr_ids.add(str(a["index"]))
+            next_token = page.get("next-token")
+            if not next_token:
+                break
+        print(f"[HOLDINGS] Found {len(monstr_ids)} MONSTR ASAs from creator")
+
+        if not monstr_ids:
+            return 0
+
+        # Now fetch the wallet's assets and count matches
+        wallet_url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false"
+        req2 = urllib.request.Request(wallet_url, headers={
             "User-Agent": "Mozilla/5.0",
             "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
         })
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read())
+        with urllib.request.urlopen(req2, timeout=8) as r:
+            wallet_data = json.loads(r.read())
 
-        assets = data.get("assets", [])
-        # Filter: amount > 0, and asset-id in MONSTR_ASSETS if we have no creator address
-        from encounters import MONSTR_ASSETS
-        monstr_ids = set(MONSTR_ASSETS.keys())
-        count = sum(1 for a in assets if str(a.get("asset-id", "")) in monstr_ids and a.get("amount", 0) > 0)
+        count = sum(
+            1 for a in wallet_data.get("assets", [])
+            if str(a.get("asset-id", "")) in monstr_ids and a.get("amount", 0) > 0
+        )
+        print(f"[HOLDINGS] Wallet {wallet_address[:8]}... holds {count} MONSTRs")
         return count
 
     except Exception as e:
