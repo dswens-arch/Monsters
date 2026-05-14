@@ -279,7 +279,7 @@ def _fetch_json_gateways(cid, timeout=8):
 def _resolve_image_url(image_field):
     if image_field.startswith("ipfs://"):
         cid = image_field.replace("ipfs://", "").split("?")[0].split("#")[0]
-        return f"https://cloudflare-ipfs.com/ipfs/{cid}"
+        return f"https://dweb.link/ipfs/{cid}"
     elif image_field.startswith("https://"):
         return image_field
     return None
@@ -327,7 +327,7 @@ def fetch_avatar_url(asa_id):
                 result = _resolve_image_url(meta.get("image", ""))
                 if result:
                     return result
-            return f"https://cloudflare-ipfs.com/ipfs/{cid}"
+            return f"https://dweb.link/ipfs/{cid}"
 
         elif url_field.startswith("https://"):
             return url_field
