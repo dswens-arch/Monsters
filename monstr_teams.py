@@ -387,19 +387,25 @@ def fetch_monstr_holdings(wallet_address: str) -> int:
         if not monstr_ids:
             return 0
 
-        # Now fetch the wallet's assets and count matches
-        wallet_url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false"
-        req2 = urllib.request.Request(wallet_url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req2, timeout=8) as r:
-            wallet_data = json.loads(r.read())
-
-        count = sum(
-            1 for a in wallet_data.get("assets", [])
-            if str(a.get("asset-id", "")) in monstr_ids and a.get("amount", 0) > 0
-        )
+        # Paginate through the wallet's full asset list and count matches
+        count = 0
+        next_token = None
+        while True:
+            wallet_url = (
+                f"{indexer_url}/v2/accounts/{wallet_address}/assets"
+                f"?include-all=false&limit=1000"
+            )
+            if next_token:
+                wallet_url += f"&next={next_token}"
+            req2 = urllib.request.Request(wallet_url, headers=headers)
+            with urllib.request.urlopen(req2, timeout=8) as r:
+                wallet_data = json.loads(r.read())
+            for a in wallet_data.get("assets", []):
+                if str(a.get("asset-id", "")) in monstr_ids and a.get("amount", 0) > 0:
+                    count += 1
+            next_token = wallet_data.get("next-token")
+            if not next_token:
+                break
         print(f"[HOLDINGS] Wallet {wallet_address[:8]}... holds {count} MONSTRs")
         return count
 
