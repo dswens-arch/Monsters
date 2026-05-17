@@ -3565,6 +3565,20 @@ class WalletCog(commands.Cog):
             db = get_supabase()
             asset_id = os.environ["GOO_ASSET_ID"]
 
+            # Gate: must hold at least one MONSTR to link
+            holdings = await asyncio.wait_for(
+                asyncio.to_thread(fetch_monstr_holdings, wallet),
+                timeout=15
+            )
+            if holdings == 0:
+                await interaction.followup.send(
+                    "❌ **No MONSTRs detected in that wallet.**\n\n"
+                    "You need to hold at least one MONSTR NFT to participate in $GOO Encounters.\n"
+                    "Pick one up and try again!",
+                    ephemeral=True
+                )
+                return
+
             db.table("linked_wallets").upsert({
                 "user_id":        str(interaction.user.id),
                 "wallet_address": wallet,
