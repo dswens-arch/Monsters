@@ -287,7 +287,7 @@ def _resolve_image_url(image_field):
 
 def fetch_avatar_url(asa_id):
     try:
-        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+        indexer_url = os.getenv("INDEXER_URL", DEFAULT_INDEXER)
         req = urllib.request.Request(
             f"{indexer_url}/v2/assets/{asa_id}",
             headers={
@@ -345,67 +345,94 @@ def fetch_avatar_url(asa_id):
 # HOLDINGS COUNT (live from chain)
 # ─────────────────────────────────────────────
 
-# Hardcoded creator address — no env var needed
+# Hardcoded creator address
 MONSTR_CREATOR_ADDRESS = "TBIHX5R5QWGWVD4FOL4SL62WXA3CBKRZEYONMOZWCIYGX6IGTQNMCV43BQ"
+
+# Nodely free indexer — no rate limits, no API key needed
+DEFAULT_INDEXER = "https://mainnet-idx.4160.nodely.io"
+
+# In-memory cache for creator ASA list — fetched once per bot run
+# { "ids": set(), "fetched_at": datetime }
+_monstr_ids_cache: dict = {}
+_CACHE_TTL_HOURS = 6
+
+
+def _get_monstr_ids() -> set:
+    """
+    Return the set of all MONSTR ASA IDs created by MONSTR_CREATOR_ADDRESS.
+    Cached in memory for 6 hours — fetched fresh on first call or after TTL.
+    """
+    now = datetime.now(timezone.utc)
+    cached = _monstr_ids_cache.get("fetched_at")
+    if cached and (now - cached).total_seconds() < _CACHE_TTL_HOURS * 3600:
+        return _monstr_ids_cache["ids"]
+
+    indexer_url = os.getenv("INDEXER_URL", DEFAULT_INDEXER)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
+    }
+    monstr_ids = set()
+    next_token = None
+    while True:
+        url = (
+            f"{indexer_url}/v2/assets"
+            f"?creator={MONSTR_CREATOR_ADDRESS}"
+            f"&limit=1000&include-all=false"
+        )
+        if next_token:
+            url += f"&next={next_token}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            page = json.loads(r.read())
+        for a in page.get("assets", []):
+            monstr_ids.add(str(a["index"]))
+        next_token = page.get("next-token")
+        if not next_token:
+            break
+
+    _monstr_ids_cache["ids"] = monstr_ids
+    _monstr_ids_cache["fetched_at"] = now
+    print(f"[HOLDINGS] Cached {len(monstr_ids)} MONSTR ASAs from creator")
+    return monstr_ids
 
 
 def fetch_monstr_holdings(wallet_address: str) -> int:
     """
     Returns number of MONSTR NFTs held by wallet_address.
-    Queries the indexer for all assets created by MONSTR_CREATOR_ADDRESS
-    that the wallet holds with amount > 0.
+    Uses cached creator ASA list — only the wallet lookup hits the indexer live.
     """
     try:
-        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+        monstr_ids = _get_monstr_ids()
+        if not monstr_ids:
+            return 0
 
-        # Paginate through all assets created by the MONSTRS creator address
-        monstr_ids = set()
-        next_token = None
+        indexer_url = os.getenv("INDEXER_URL", DEFAULT_INDEXER)
         headers = {
             "User-Agent": "Mozilla/5.0",
             "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
         }
-        while True:
-            url = (
-                f"{indexer_url}/v2/assets"
-                f"?creator={MONSTR_CREATOR_ADDRESS}"
-                f"&limit=1000"
-                f"&include-all=false"
-            )
-            if next_token:
-                url += f"&next={next_token}"
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as r:
-                page = json.loads(r.read())
-            for a in page.get("assets", []):
-                monstr_ids.add(str(a["index"]))
-            next_token = page.get("next-token")
-            if not next_token:
-                break
-        print(f"[HOLDINGS] Found {len(monstr_ids)} MONSTR ASAs from creator")
 
-        if not monstr_ids:
-            return 0
-
-        # Paginate through the wallet's full asset list and count matches
+        # Paginate through the wallet's full asset list
         count = 0
         next_token = None
         while True:
-            wallet_url = (
+            url = (
                 f"{indexer_url}/v2/accounts/{wallet_address}/assets"
                 f"?include-all=false&limit=1000"
             )
             if next_token:
-                wallet_url += f"&next={next_token}"
-            req2 = urllib.request.Request(wallet_url, headers=headers)
-            with urllib.request.urlopen(req2, timeout=8) as r:
-                wallet_data = json.loads(r.read())
-            for a in wallet_data.get("assets", []):
+                url += f"&next={next_token}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read())
+            for a in data.get("assets", []):
                 if str(a.get("asset-id", "")) in monstr_ids and a.get("amount", 0) > 0:
                     count += 1
-            next_token = wallet_data.get("next-token")
+            next_token = data.get("next-token")
             if not next_token:
                 break
+
         print(f"[HOLDINGS] Wallet {wallet_address[:8]}... holds {count} MONSTRs")
         return count
 
