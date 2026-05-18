@@ -3144,9 +3144,12 @@ class EncountersCog(commands.Cog):
         self.encounter_message = None
         self._attack_cooldowns.clear()
 
-        # ── Credit GOO balances instantly (no chain involvement) ──
-        await payout_all(state, payouts, channel)
-        print("[CLOSE] GOO credited to balances — background sender handles on-chain")
+        # ── Credit GOO balances instantly (skipped in test mode) ──
+        if not test_mode:
+            await payout_all(state, payouts, channel)
+            print("[CLOSE] GOO credited to balances — background sender handles on-chain")
+        else:
+            print("[TEST] GOO payout skipped in test mode")
 
         # ── Show escaped state on main embed if time ran out ──
         all_waves_done = state.wave_index >= state.total_waves
@@ -3175,6 +3178,10 @@ class EncountersCog(commands.Cog):
         # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
         # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
         async def _background_tasks():
+            if test_mode:
+                print("[TEST] Skipping all DB writes, stats, milestones, BP, and GOO in test mode")
+                return
+
             try:
                 print("[CLOSE] Writing to DB...")
                 await asyncio.to_thread(log_encounter_to_db, state, payouts)
@@ -3209,72 +3216,83 @@ class EncountersCog(commands.Cog):
                     uid: tagged for uid, tagged in state.tag_pairs.items()
                     if tagged in state.damage_dealt and uid in state.damage_dealt
                 }
-                from monstr_teams import award_tag_bp
-                for uid, tagged in valid_pairs.items():
-                    # Upsert ally history for both directions
-                    for a, b in [(str(uid), str(tagged)), (str(tagged), str(uid))]:
-                        existing = db_ally.table("tag_ally_history").select("id,tag_count").eq("user_id", a).eq("ally_id", b).execute()
-                        if existing.data:
-                            db_ally.table("tag_ally_history").update({
-                                "tag_count": existing.data[0]["tag_count"] + 1,
-                                "last_tagged_at": datetime.now(timezone.utc).isoformat(),
-                            }).eq("id", existing.data[0]["id"]).execute()
-                        else:
-                            db_ally.table("tag_ally_history").insert({
-                                "user_id": a, "ally_id": b, "tag_count": 1,
-                                "last_tagged_at": datetime.now(timezone.utc).isoformat(),
-                            }).execute()
-                    # Award BP synergy to both
-                    for bp_uid in [str(uid), str(tagged)]:
-                        _, old_t, new_t = award_tag_bp(bp_uid)
-                        if old_t != new_t:
-                            label = next(t[1] for t in TIERS if t[0] == new_t)
-                            await channel.send(
-                                f"⚡ <@{bp_uid}> **TIER UP!** Your team just reached **{label}**!"
-                            )
+                if valid_pairs:
+                    # Announce team bonus for each valid pair
+                    from monstr_teams import TIERS as _TIERS
+                    for uid, tagged in valid_pairs.items():
+                        await channel.send(
+                            f"🤝 <@{uid}> & <@{tagged}> fought as a team and split the **team bonus pool**!"
+                            + (" *(+8 BP each)*" if not test_mode else " *(test mode — no BP awarded)*")
+                        )
+
+                if not test_mode:
+                    from monstr_teams import award_tag_bp
+                    for uid, tagged in valid_pairs.items():
+                        # Upsert ally history for both directions
+                        for a, b in [(str(uid), str(tagged)), (str(tagged), str(uid))]:
+                            existing = db_ally.table("tag_ally_history").select("id,tag_count").eq("user_id", a).eq("ally_id", b).execute()
+                            if existing.data:
+                                db_ally.table("tag_ally_history").update({
+                                    "tag_count": existing.data[0]["tag_count"] + 1,
+                                    "last_tagged_at": datetime.now(timezone.utc).isoformat(),
+                                }).eq("id", existing.data[0]["id"]).execute()
+                            else:
+                                db_ally.table("tag_ally_history").insert({
+                                    "user_id": a, "ally_id": b, "tag_count": 1,
+                                    "last_tagged_at": datetime.now(timezone.utc).isoformat(),
+                                }).execute()
+                        # Award BP synergy to both
+                        for bp_uid in [str(uid), str(tagged)]:
+                            _, old_t, new_t = award_tag_bp(bp_uid)
+                            if old_t != new_t:
+                                label = next(t[1] for t in _TIERS if t[0] == new_t)
+                                await channel.send(
+                                    f"⚡ <@{bp_uid}> **TIER UP!** Your team just reached **{label}**!"
+                                )
             except Exception as e:
                 print(f"[ERROR] Ally history/tag BP: {e}")
 
-            # ── Award BP to teams ──
-            try:
-                db_bp = get_supabase()
-                # Fetch all linked wallets for attackers in one pass
-                attacker_ids = [str(uid) for uid in state.damage_dealt]
-                wallet_rows  = db_bp.table("linked_wallets").select("user_id,wallet_address").in_("user_id", attacker_ids).execute()
-                wallet_map   = {r["user_id"]: r["wallet_address"] for r in wallet_rows.data}
+            # ── Award BP to teams (skipped in test mode) ──
+            if not test_mode:
+                try:
+                    db_bp = get_supabase()
+                    attacker_ids = [str(uid) for uid in state.damage_dealt]
+                    wallet_rows  = db_bp.table("linked_wallets").select("user_id,wallet_address").in_("user_id", attacker_ids).execute()
+                    wallet_map   = {r["user_id"]: r["wallet_address"] for r in wallet_rows.data}
 
-                for uid, dmg in state.damage_dealt.items():
-                    got_kill = uid == state.kill_shotter
-                    crits    = state.crit_counts.get(uid, 0)
+                    for uid, dmg in state.damage_dealt.items():
+                        got_kill = uid == state.kill_shotter
+                        crits    = state.crit_counts.get(uid, 0)
 
-                    # Live holdings count for BP multiplier
-                    wallet = wallet_map.get(str(uid))
-                    holdings = 0
-                    if wallet:
-                        try:
-                            holdings = await asyncio.wait_for(
-                                asyncio.to_thread(fetch_monstr_holdings, wallet),
-                                timeout=8
-                            )
-                        except Exception:
-                            holdings = 0
+                        wallet = wallet_map.get(str(uid))
+                        holdings = 0
+                        if wallet:
+                            try:
+                                holdings = await asyncio.wait_for(
+                                    asyncio.to_thread(fetch_monstr_holdings, wallet),
+                                    timeout=8
+                                )
+                            except Exception:
+                                holdings = 0
 
-                    bp_earned, old_tier, new_tier = award_bp(
-                        str(uid),
-                        participated=True,
-                        got_kill_shot=got_kill,
-                        crits=crits,
-                        is_boss=state.is_boss,
-                        holdings=holdings,
-                    )
-                    if old_tier != new_tier:
-                        label = next(t[1] for t in TIERS if t[0] == new_tier)
-                        await channel.send(
-                            f"⚡ <@{uid}> **TIER UP!** Your team just reached **{label}**! "
-                            f"Attack power and stun resistance increased."
+                        bp_earned, old_tier, new_tier = award_bp(
+                            str(uid),
+                            participated=True,
+                            got_kill_shot=got_kill,
+                            crits=crits,
+                            is_boss=state.is_boss,
+                            holdings=holdings,
                         )
-            except Exception as e:
-                print(f"[ERROR] BP award: {e}")
+                        if old_tier != new_tier:
+                            label = next(t[1] for t in TIERS if t[0] == new_tier)
+                            await channel.send(
+                                f"⚡ <@{uid}> **TIER UP!** Your team just reached **{label}**! "
+                                f"Attack power and stun resistance increased."
+                            )
+                except Exception as e:
+                    print(f"[ERROR] BP award: {e}")
+            else:
+                print("[TEST] BP award skipped in test mode")
 
             print("[CLOSE] Encounter fully closed")
 
