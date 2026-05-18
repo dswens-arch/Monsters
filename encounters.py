@@ -3062,18 +3062,26 @@ class EncountersCog(commands.Cog):
     # ── Encounter Runner ───────────────────────
 
     async def run_encounter(self, boss: bool = False, test_mode: bool = False):
+        print(f"[RUN] run_encounter called — boss={boss} test_mode={test_mode}")
         if self.active_encounter:
             print("[ENCOUNTERS] Already active, skipping.")
             return
 
         # Use test channel if test_mode, otherwise production channel
         use_channel_id = self.test_channel_id if test_mode and self.test_channel_id else self.channel_id
+        print(f"[RUN] Using channel_id={use_channel_id} (test_channel_id={self.test_channel_id})")
         channel = self.bot.get_channel(use_channel_id)
         if not channel:
-            print(f"[ERROR] Channel {use_channel_id} not found.")
+            print(f"[ERROR] Channel {use_channel_id} not found — bot may not have access.")
             return
+        print(f"[RUN] Channel found: #{channel.name}")
 
-        monstrs = await pick_wave(boss=boss, test_mode=test_mode)
+        try:
+            monstrs = await pick_wave(boss=boss, test_mode=test_mode)
+            print(f"[RUN] Picked {len(monstrs)} MONSTRs")
+        except Exception as e:
+            print(f"[ERROR] pick_wave failed: {e}")
+            return
         self.active_encounter = EncounterState(monstrs, is_boss=boss)
 
         role_ping = f"<@&{self.encounter_role_id}> " if (self.encounter_role_id and not test_mode) else ""
