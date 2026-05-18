@@ -78,6 +78,7 @@ BP_KILL_SHOT       = 15
 BP_CRIT            = 3
 BP_DAILY_BONUS     = 5
 BP_BOSS_KILL       = 10
+BP_TAG_SYNERGY     = 8   # earned by both players when a valid tag pair completes together
 
 # Holdings-based BP multiplier tiers
 HOLDINGS_MULTIPLIERS = [
@@ -183,6 +184,26 @@ def award_bp(
         "updated_at":         datetime.now(timezone.utc).isoformat(),
     }).eq("user_id", user_id).execute()
 
+    return earned, old_tier, new_tier
+
+
+def award_tag_bp(user_id: str) -> tuple[int, str, str]:
+    """
+    Award BP synergy bonus when a valid tag pair both attack in the same encounter.
+    Called once per player in the pair at encounter close.
+    Returns (bp_earned, old_tier_key, new_tier_key).
+    """
+    db = _db()
+    team = get_or_create_team(db, user_id)
+    earned = BP_TAG_SYNERGY
+    new_bp  = team["total_bp"] + earned
+    old_tier = team["tier"]
+    new_tier, _, _, _ = resolve_tier(new_bp)
+    db.table("monstr_teams").update({
+        "total_bp":   new_bp,
+        "tier":       new_tier,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("user_id", user_id).execute()
     return earned, old_tier, new_tier
 
 
