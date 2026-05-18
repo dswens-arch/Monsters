@@ -2910,10 +2910,15 @@ class TagTeammateButton(discord.ui.Button):
         if role_id and interaction.guild:
             role = interaction.guild.get_role(role_id)
             if role:
+                # Use role.members — works when intents.members = True
+                # Filter out self and bots
                 gooards_ids = [
                     m.id for m in role.members
                     if m.id != interaction.user.id and not m.bot
                 ]
+                print(f"[TAG] GOOards role has {len(role.members)} members, {len(gooards_ids)} eligible")
+            else:
+                print(f"[TAG] Role {role_id} not found in guild cache")
 
         if not gooards_ids:
             await interaction.followup.send(
@@ -2923,7 +2928,7 @@ class TagTeammateButton(discord.ui.Button):
             return
 
         await interaction.followup.send(
-            f"👇 Tag a **GOOard** as your ally to split the team bonus:",
+            f"👇 Tag a **GOOard** as your ally to split the team bonus ({len(gooards_ids)} eligible):",
             view=TeammateSelectView(cog, gooards_ids),
             ephemeral=True
         )
@@ -3185,7 +3190,20 @@ class EncountersCog(commands.Cog):
         await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
-        # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
+        # ── Team bonus announcement (always fires, even in test mode) ──
+        try:
+            valid_pairs = {
+                uid: tagged for uid, tagged in state.tag_pairs.items()
+                if tagged in state.damage_dealt and uid in state.damage_dealt
+            }
+            for uid, tagged in valid_pairs.items():
+                await channel.send(
+                    f"🤝 <@{uid}> & <@{tagged}> fought as a team and split the **team bonus pool**!"
+                    + (" *(test mode — no BP awarded)*" if test_mode else " *(+8 BP each)*")
+                )
+        except Exception as e:
+            print(f"[ERROR] Team bonus announcement: {e}")
+
         # ── Background tasks: DB writes, stats, milestones (non-blocking) ──
         async def _background_tasks():
             if test_mode:
@@ -3226,15 +3244,6 @@ class EncountersCog(commands.Cog):
                     uid: tagged for uid, tagged in state.tag_pairs.items()
                     if tagged in state.damage_dealt and uid in state.damage_dealt
                 }
-                if valid_pairs:
-                    # Announce team bonus for each valid pair
-                    from monstr_teams import TIERS as _TIERS
-                    for uid, tagged in valid_pairs.items():
-                        await channel.send(
-                            f"🤝 <@{uid}> & <@{tagged}> fought as a team and split the **team bonus pool**!"
-                            + (" *(+8 BP each)*" if not test_mode else " *(test mode — no BP awarded)*")
-                        )
-
                 if not test_mode:
                     from monstr_teams import award_tag_bp
                     for uid, tagged in valid_pairs.items():
