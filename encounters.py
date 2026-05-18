@@ -3117,6 +3117,14 @@ class EncountersCog(commands.Cog):
             await asyncio.sleep(1)
             state = self.active_encounter
             if state and not state.alive:
+                # Build the defeated embed BEFORE advancing — state still points to the dead wave
+                if self.encounter_message:
+                    try:
+                        defeated_embed = self._build_defeated_embed(state)
+                        await self.encounter_message.edit(embed=defeated_embed, view=None)
+                    except Exception as e:
+                        print(f"[WAVE] Could not mark wave as defeated: {e}")
+
                 has_next = state.next_wave()
                 if has_next:
                     await self._post_wave_embed(
@@ -3458,14 +3466,7 @@ class EncountersCog(commands.Cog):
 
     async def _post_wave_embed(self, channel: discord.TextChannel, prefix: str):
         """Post or update the encounter embed for a new wave."""
-        # Mark previous wave's message as defeated and disable all buttons
-        if self.encounter_message:
-            try:
-                state = self.active_encounter
-                defeated_embed = self._build_defeated_embed(state)
-                await self.encounter_message.edit(embed=defeated_embed, view=None)
-            except Exception as e:
-                print(f"[WAVE] Could not mark old wave as defeated: {e}")
+        # Buttons on previous message already disabled/defeated before this is called
 
         state = self.active_encounter
         embed = self._build_encounter_embed(state)
