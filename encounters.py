@@ -3651,9 +3651,7 @@ class EncountersCog(commands.Cog):
 
     @discord.app_commands.command(name="testencounter", description="[TEST] Fire a low-HP encounter in the test channel")
     async def test_encounter(self, interaction: discord.Interaction):
-        if self.active_encounter:
-            self.active_encounter = None
-            await asyncio.sleep(0.5)
+        # Respond immediately — must happen before any awaits
         if self.test_channel_id:
             await interaction.response.send_message(
                 f"🧪 Spawning test encounter in <#{self.test_channel_id}>...", ephemeral=True
@@ -3662,13 +3660,13 @@ class EncountersCog(commands.Cog):
             await interaction.response.send_message(
                 "🧪 Spawning test encounter (set DISCORD_TEST_CHANNEL_ID to use a separate channel)...", ephemeral=True
             )
+        # Clear any stale encounter then fire
+        self.active_encounter = None
         asyncio.create_task(self.run_encounter(boss=False, test_mode=True))
 
     @discord.app_commands.command(name="testboss", description="[TEST] Fire a low-HP boss encounter in the test channel")
     async def test_boss(self, interaction: discord.Interaction):
-        if self.active_encounter:
-            self.active_encounter = None
-            await asyncio.sleep(0.5)
+        # Respond immediately — must happen before any awaits
         if self.test_channel_id:
             await interaction.response.send_message(
                 f"🧪 Spawning test boss in <#{self.test_channel_id}>...", ephemeral=True
@@ -3677,6 +3675,8 @@ class EncountersCog(commands.Cog):
             await interaction.response.send_message(
                 "🧪 Spawning test boss (set DISCORD_TEST_CHANNEL_ID to use a separate channel)...", ephemeral=True
             )
+        # Clear any stale encounter then fire
+        self.active_encounter = None
         asyncio.create_task(self.run_encounter(boss=True, test_mode=True))
 
 
