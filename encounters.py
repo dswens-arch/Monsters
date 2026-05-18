@@ -2928,6 +2928,10 @@ class EncountersCog(commands.Cog):
         self.bot = bot
         self.channel_id = int(os.environ["DISCORD_ENCOUNTERS_CHANNEL_ID"])
         self.encounter_role_id = int(os.environ.get("DISCORD_ENCOUNTER_ROLE_ID", "0"))
+        try:
+            self.test_channel_id = int(os.environ.get("DISCORD_TEST_CHANNEL_ID", "0"))
+        except (ValueError, TypeError):
+            self.test_channel_id = 0
         self.active_encounter: EncounterState | None = None
         self.encounter_message: discord.Message | None = None
         self._next_encounters: dict = {}
