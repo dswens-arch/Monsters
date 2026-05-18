@@ -47,7 +47,7 @@ from discord.ext import commands, tasks
 from supabase import create_client, Client
 
 from monstr_teams import (
-    award_bp, roll_stun_resist, get_atk_multiplier,
+    award_bp, award_tag_bp, roll_stun_resist, get_atk_multiplier,
     get_or_create_team, get_team, resolve_tier, next_tier_info,
     fetch_avatar_url, fetch_monstr_holdings, TIERS,
 )
@@ -2514,6 +2514,28 @@ class EncounterState:
             for uid, tagged in valid_team_pairs.items():
                 team_members.add(uid)
                 team_members.add(tagged)
+
+            # Combined tier bonus — if both partners are Veteran+ tier, boost the team pool
+            try:
+                from monstr_teams import resolve_tier, get_team
+                from supabase import create_client
+                import os as _os
+                _db = create_client(_os.environ["SUPABASE_URL"], _os.environ["SUPABASE_KEY"])
+                VETERAN_TIERS = {"veteran", "warlord"}
+                boosted_pool = team_pool
+                for uid, tagged in valid_team_pairs.items():
+                    t1 = get_team(_db, str(uid))
+                    t2 = get_team(_db, str(tagged))
+                    tier1 = t1.get("tier", "raw") if t1 else "raw"
+                    tier2 = t2.get("tier", "raw") if t2 else "raw"
+                    if tier1 in VETERAN_TIERS and tier2 in VETERAN_TIERS:
+                        boosted_pool = int(team_pool * 1.5)
+                        print(f"[TEAM] Veteran+ pair {uid}/{tagged} — team pool boosted to {boosted_pool}")
+                        break
+                team_pool = boosted_pool
+            except Exception as e:
+                print(f"[TEAM] Tier bonus calc failed: {e}")
+
             per_member = team_pool // max(len(team_members), 1)
             for uid in team_members:
                 payouts[uid] = payouts.get(uid, 0) + per_member
@@ -2786,21 +2808,22 @@ async def announce_milestones(bot, channel, user_id: int, milestones: list[tuple
 # ─────────────────────────────────────────────
 
 class TeammateSelectView(discord.ui.View):
-    """Ephemeral view with a Discord user select menu — shows autocomplete suggestions."""
-    def __init__(self, cog):
+    """Ephemeral view with a Discord user select menu filtered to linked wallet holders."""
+    def __init__(self, cog, linked_user_ids: list):
         super().__init__(timeout=60)
         self.cog = cog
-        self.add_item(TeammateSelect(cog))
+        self.add_item(TeammateSelect(cog, linked_user_ids))
 
 
 class TeammateSelect(discord.ui.UserSelect):
-    def __init__(self, cog):
+    def __init__(self, cog, linked_user_ids: list):
         super().__init__(
-            placeholder="Search for a teammate...",
+            placeholder="Pick a linked wallet holder...",
             min_values=1,
             max_values=1,
         )
         self.cog = cog
+        self.linked_user_ids = set(linked_user_ids)
 
     async def callback(self, interaction: discord.Interaction):
         selected = self.values[0]
@@ -2813,12 +2836,22 @@ class TeammateSelect(discord.ui.UserSelect):
             await interaction.response.send_message("The encounter already ended!", ephemeral=True)
             return
 
+        # Only allow tagging linked wallet holders
+        if selected.id not in self.linked_user_ids:
+            await interaction.response.send_message(
+                f"❌ **{selected.display_name}** hasn't linked a wallet yet — "
+                f"they need to run `/link` before they can be tagged as an ally.",
+                ephemeral=True
+            )
+            return
+
         await self.cog._process_attack(
             interaction,
             tagged_id=selected.id,
             tagged_name=selected.display_name,
-            attack_type=1  # Blaze for team attacks
+            attack_type=1
         )
+
 
 
 class AttackButton(discord.ui.Button):
@@ -2860,9 +2893,29 @@ class TagTeammateButton(discord.ui.Button):
                 ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            "👇 Pick your teammate from the list below:",
-            view=TeammateSelectView(cog),
+        # Check if user already tagged someone this encounter
+        user_id = interaction.user.id
+        if user_id in cog.active_encounter.tag_pairs:
+            ally_id = cog.active_encounter.tag_pairs[user_id]
+            await interaction.response.send_message(
+                f"⚔️ You've already tagged <@{ally_id}> as your ally this encounter!",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Fetch linked wallet user IDs for filtering
+        try:
+            db = get_supabase()
+            rows = db.table("linked_wallets").select("user_id").execute()
+            linked_ids = [int(r["user_id"]) for r in rows.data if r["user_id"].isdigit()]
+        except Exception:
+            linked_ids = []
+
+        await interaction.followup.send(
+            "👇 Pick a linked wallet holder as your ally — only players with a linked wallet are eligible:",
+            view=TeammateSelectView(cog, linked_ids),
             ephemeral=True
         )
 
@@ -3133,6 +3186,39 @@ class EncountersCog(commands.Cog):
 
             for uid, milestones in milestone_tasks:
                 await announce_milestones(self.bot, channel, uid, milestones)
+
+            # ── Record ally history + award tag BP synergy ──
+            try:
+                db_ally = get_supabase()
+                valid_pairs = {
+                    uid: tagged for uid, tagged in state.tag_pairs.items()
+                    if tagged in state.damage_dealt and uid in state.damage_dealt
+                }
+                from monstr_teams import award_tag_bp
+                for uid, tagged in valid_pairs.items():
+                    # Upsert ally history for both directions
+                    for a, b in [(str(uid), str(tagged)), (str(tagged), str(uid))]:
+                        existing = db_ally.table("tag_ally_history").select("id,tag_count").eq("user_id", a).eq("ally_id", b).execute()
+                        if existing.data:
+                            db_ally.table("tag_ally_history").update({
+                                "tag_count": existing.data[0]["tag_count"] + 1,
+                                "last_tagged_at": datetime.now(timezone.utc).isoformat(),
+                            }).eq("id", existing.data[0]["id"]).execute()
+                        else:
+                            db_ally.table("tag_ally_history").insert({
+                                "user_id": a, "ally_id": b, "tag_count": 1,
+                                "last_tagged_at": datetime.now(timezone.utc).isoformat(),
+                            }).execute()
+                    # Award BP synergy to both
+                    for bp_uid in [str(uid), str(tagged)]:
+                        _, old_t, new_t = award_tag_bp(bp_uid)
+                        if old_t != new_t:
+                            label = next(t[1] for t in TIERS if t[0] == new_t)
+                            await channel.send(
+                                f"⚡ <@{bp_uid}> **TIER UP!** Your team just reached **{label}**!"
+                            )
+            except Exception as e:
+                print(f"[ERROR] Ally history/tag BP: {e}")
 
             # ── Award BP to teams ──
             try:
@@ -3425,6 +3511,24 @@ class EncountersCog(commands.Cog):
             lines.append("💀 **Kill Shot landed!** Bonus incoming.")
         if tagged_name:
             lines.append(f"🤝 Teamed up with **{tagged_name}**!")
+            # Notify the tagged person
+            try:
+                channel = interaction.channel
+                await channel.send(
+                    f"⚔️ <@{tagged_id}> — **{interaction.user.display_name}** just tagged you as their ally! "
+                    f"Attack the MONSTR to earn the team bonus together!",
+                    delete_after=30
+                )
+            except Exception as e:
+                print(f"[TAG] Could not send ally notification: {e}")
+
+            # BP synergy bonus — both players get +5 BP for forming a team
+            try:
+                from monstr_teams import award_bp
+                for bp_uid in [str(interaction.user.id), str(tagged_id)]:
+                    award_bp(bp_uid, participated=False, got_kill_shot=False, crits=0, is_boss=False, holdings=0)
+            except Exception as e:
+                print(f"[TAG] BP synergy award failed: {e}")
 
         # Counter-attack — apply stun if triggered (stun resist can block it)
         if result.get("is_counter") and state.alive:
@@ -3564,20 +3668,6 @@ class WalletCog(commands.Cog):
         try:
             db = get_supabase()
             asset_id = os.environ["GOO_ASSET_ID"]
-
-            # Gate: must hold at least one MONSTR to link
-            holdings = await asyncio.wait_for(
-                asyncio.to_thread(fetch_monstr_holdings, wallet),
-                timeout=15
-            )
-            if holdings == 0:
-                await interaction.followup.send(
-                    "❌ **No MONSTRs detected in that wallet.**\n\n"
-                    "You need to hold at least one MONSTR NFT to participate in $GOO Encounters.\n"
-                    "Pick one up and try again!",
-                    ephemeral=True
-                )
-                return
 
             db.table("linked_wallets").upsert({
                 "user_id":        str(interaction.user.id),
@@ -3869,6 +3959,20 @@ class TeamsCog(commands.Cog):
             embed.add_field(name="📦 MONSTR Holdings", value=f"**{holdings}**  •  **{holdings_mult}x** BP", inline=True)
             embed.add_field(name="⚔️ Atk Bonus",       value=f"**+{int((atk_mult - 1) * 100)}%**",       inline=True)
             embed.add_field(name="🛡️ Stun Resist",     value=f"**{stun_resist}%**",                      inline=True)
+
+            # Top ally
+            try:
+                ally_row = db.table("tag_ally_history").select("ally_id,tag_count").eq("user_id", user_id).order("tag_count", desc=True).limit(1).execute()
+                if ally_row.data:
+                    top_ally_id  = ally_row.data[0]["ally_id"]
+                    top_ally_cnt = ally_row.data[0]["tag_count"]
+                    embed.add_field(
+                        name="🤝 Favourite Ally",
+                        value=f"<@{top_ally_id}>  •  tagged **{top_ally_cnt}x**",
+                        inline=False
+                    )
+            except Exception:
+                pass
             embed.set_footer(text="  •  ".join(footer_parts))
 
             if avatar_url:
