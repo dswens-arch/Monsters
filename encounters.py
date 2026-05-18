@@ -3670,7 +3670,7 @@ class EncountersCog(commands.Cog):
             )
         # Clear any stale encounter then fire
         self.active_encounter = None
-        asyncio.create_task(self.run_encounter(boss=False, test_mode=True))
+        asyncio.ensure_future(self.run_encounter(boss=False, test_mode=True))
 
     @discord.app_commands.command(name="testboss", description="[TEST] Fire a low-HP boss encounter in the test channel")
     async def test_boss(self, interaction: discord.Interaction):
@@ -3685,7 +3685,7 @@ class EncountersCog(commands.Cog):
             )
         # Clear any stale encounter then fire
         self.active_encounter = None
-        asyncio.create_task(self.run_encounter(boss=True, test_mode=True))
+        asyncio.ensure_future(self.run_encounter(boss=True, test_mode=True))
 
 
 # ─────────────────────────────────────────────
