@@ -2835,11 +2835,11 @@ class TeammateSelect(discord.ui.UserSelect):
             await interaction.response.send_message("The encounter already ended!", ephemeral=True)
             return
 
-        # Only allow tagging linked wallet holders
+        # Only allow tagging GOOards role holders
         if selected.id not in self.linked_user_ids:
             await interaction.response.send_message(
-                f"❌ **{selected.display_name}** hasn't linked a wallet yet — "
-                f"they need to run `/link` before they can be tagged as an ally.",
+                f"❌ **{selected.display_name}** doesn't have the GOOards role — "
+                f"only verified MONSTR holders can be tagged as allies.",
                 ephemeral=True
             )
             return
@@ -2904,17 +2904,27 @@ class TagTeammateButton(discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Fetch linked wallet user IDs for filtering
-        try:
-            db = get_supabase()
-            rows = db.table("linked_wallets").select("user_id").execute()
-            linked_ids = [int(r["user_id"]) for r in rows.data if r["user_id"].isdigit()]
-        except Exception:
-            linked_ids = []
+        # Filter picker to GOOards role holders (verified MONSTR holders)
+        role_id = int(os.environ.get("DISCORD_ENCOUNTER_ROLE_ID", "0"))
+        gooards_ids = []
+        if role_id and interaction.guild:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                gooards_ids = [
+                    m.id for m in role.members
+                    if m.id != interaction.user.id and not m.bot
+                ]
+
+        if not gooards_ids:
+            await interaction.followup.send(
+                "⚔️ No eligible allies found — only GOOards role holders can be tagged.",
+                ephemeral=True
+            )
+            return
 
         await interaction.followup.send(
-            "👇 Pick a linked wallet holder as your ally — only players with a linked wallet are eligible:",
-            view=TeammateSelectView(cog, linked_ids),
+            f"👇 Tag a **GOOard** as your ally to split the team bonus:",
+            view=TeammateSelectView(cog, gooards_ids),
             ephemeral=True
         )
 
@@ -3111,9 +3121,9 @@ class EncountersCog(commands.Cog):
                 else:
                     break  # All waves cleared
 
-        await self._close_encounter(channel)
+        await self._close_encounter(channel, test_mode=test_mode)
 
-    async def _close_encounter(self, channel: discord.TextChannel):
+    async def _close_encounter(self, channel: discord.TextChannel, test_mode: bool = False):
         state = self.active_encounter
         if not state:
             print("[CLOSE] No active encounter, skipping.")
