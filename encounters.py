@@ -3196,9 +3196,24 @@ class EncountersCog(commands.Cog):
                 uid: tagged for uid, tagged in state.tag_pairs.items()
                 if tagged in state.damage_dealt and uid in state.damage_dealt
             }
+            # Deduplicate — only announce each pair once (A→B and B→A are the same pair)
+            seen_pairs = set()
             for uid, tagged in valid_pairs.items():
+                pair_key = tuple(sorted([uid, tagged]))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                # Calculate the team pool split
+                mult = BOSS_MULTIPLIER if state.is_boss else 1
+                team_pool = TEAM_BONUS_POOL * mult
+                team_members = set()
+                for u, t in valid_pairs.items():
+                    team_members.add(u)
+                    team_members.add(t)
+                per_member = team_pool // max(len(team_members), 1)
                 await channel.send(
-                    f"🤝 <@{uid}> & <@{tagged}> fought as a team and split the **team bonus pool**!"
+                    f"🤝 <@{uid}> & <@{tagged}> fought as a team and split the **team bonus pool** "
+                    f"— **{per_member:,} $GOO each**!"
                     + (" *(test mode — no BP awarded)*" if test_mode else " *(+8 BP each)*")
                 )
         except Exception as e:
@@ -3443,24 +3458,14 @@ class EncountersCog(commands.Cog):
 
     async def _post_wave_embed(self, channel: discord.TextChannel, prefix: str):
         """Post or update the encounter embed for a new wave."""
-        # Disable ALL buttons on the previous wave's message before posting the new one
+        # Mark previous wave's message as defeated and disable all buttons
         if self.encounter_message:
             try:
-                disabled_view = discord.ui.View()
-                for item in self._build_attack_view().children:
-                    item.disabled = True
-                    disabled_view.add_item(item)
-                # Also disable the tag button explicitly
-                tag_btn = discord.ui.Button(
-                    label="🤝 Tag a Friend",
-                    style=discord.ButtonStyle.primary,
-                    custom_id="attack_team",
-                    disabled=True,
-                )
-                disabled_view.add_item(tag_btn)
-                await self.encounter_message.edit(view=disabled_view)
+                state = self.active_encounter
+                defeated_embed = self._build_defeated_embed(state)
+                await self.encounter_message.edit(embed=defeated_embed, view=None)
             except Exception as e:
-                print(f"[WAVE] Could not disable old wave buttons: {e}")
+                print(f"[WAVE] Could not mark old wave as defeated: {e}")
 
         state = self.active_encounter
         embed = self._build_encounter_embed(state)
