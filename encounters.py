@@ -3704,6 +3704,19 @@ class EncountersCog(commands.Cog):
 
     # ── TEST COMMANDS (remove before going live) ──
 
+    @discord.app_commands.command(name="startencounter", description="[ADMIN] Fire a full live encounter in the main channel with 5min warning")
+    @discord.app_commands.describe(boss="Fire a boss encounter instead of a standard one")
+    async def start_encounter(self, interaction: discord.Interaction, boss: bool = False):
+        await interaction.response.send_message(
+            f"✅ Sending 5 minute warning — encounter will start in 5 minutes in <#{self.channel_id}>.",
+            ephemeral=True
+        )
+        async def _run():
+            await self._send_warning(is_boss=boss)
+            await asyncio.sleep(300)
+            await self.run_encounter(boss=boss, test_mode=False)
+        asyncio.ensure_future(_run())
+
     @discord.app_commands.command(name="testencounter", description="[TEST] Fire a low-HP encounter in the test channel")
     async def test_encounter(self, interaction: discord.Interaction):
         # Respond immediately — must happen before any awaits
