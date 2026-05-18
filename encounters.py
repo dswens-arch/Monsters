@@ -2294,10 +2294,10 @@ def get_fallback_image_url(asa_id: str) -> str:
     return f"{IPFS_GATEWAY}{ipfs_hash}" if ipfs_hash else ""
 
 
-async def pick_random_monstr(boss: bool = False) -> dict:
+async def pick_random_monstr(boss: bool = False, test_mode: bool = False) -> dict:
     asa_id = random.choice(list(MONSTR_ASSETS.keys()))
     name, _ = MONSTR_ASSETS[asa_id]
-    base_hp = random.randint(5000, 10000)
+    base_hp = random.randint(150, 300) if test_mode else random.randint(5000, 10000)
 
     try:
         image_bytes = await asyncio.wait_for(fetch_live_image_url(asa_id), timeout=20)
@@ -2317,11 +2317,10 @@ async def pick_random_monstr(boss: bool = False) -> dict:
         "is_boss":      boss,
     }
 
-async def pick_wave(boss: bool = False) -> list:
+async def pick_wave(boss: bool = False, test_mode: bool = False) -> list:
     """Pick MONSTR(s) for an encounter. Boss = 1, standard = 3 waves."""
     count = 1 if boss else WAVE_COUNT
-    # Fetch all wave MONSTRs concurrently
-    monstrs = await asyncio.gather(*[pick_random_monstr(boss=boss) for _ in range(count)])
+    monstrs = await asyncio.gather(*[pick_random_monstr(boss=boss, test_mode=test_mode) for _ in range(count)])
     return list(monstrs)
 
 
@@ -3062,21 +3061,25 @@ class EncountersCog(commands.Cog):
 
     # ── Encounter Runner ───────────────────────
 
-    async def run_encounter(self, boss: bool = False):
+    async def run_encounter(self, boss: bool = False, test_mode: bool = False):
         if self.active_encounter:
             print("[ENCOUNTERS] Already active, skipping.")
             return
 
-        channel = self.bot.get_channel(self.channel_id)
+        # Use test channel if test_mode, otherwise production channel
+        use_channel_id = self.test_channel_id if test_mode and self.test_channel_id else self.channel_id
+        channel = self.bot.get_channel(use_channel_id)
         if not channel:
-            print(f"[ERROR] Channel {self.channel_id} not found.")
+            print(f"[ERROR] Channel {use_channel_id} not found.")
             return
 
-        monstrs = await pick_wave(boss=boss)
+        monstrs = await pick_wave(boss=boss, test_mode=test_mode)
         self.active_encounter = EncounterState(monstrs, is_boss=boss)
 
-        role_ping = f"<@&{self.encounter_role_id}> " if self.encounter_role_id else ""
+        role_ping = f"<@&{self.encounter_role_id}> " if (self.encounter_role_id and not test_mode) else ""
         prefix = f"{role_ping}👹 **BOSS MONSTR HAS APPEARED!** 15,000 $GOO up for grabs!" if boss else f"{role_ping}⚠️ **Wave 1/3 begins!** 3 MONSTRs — 5,000 $GOO up for grabs!"
+        if test_mode:
+            prefix = "🧪 **[TEST]** " + prefix
 
         # Post first wave embed
         await self._post_wave_embed(channel, prefix)
@@ -3391,13 +3394,21 @@ class EncountersCog(commands.Cog):
 
     async def _post_wave_embed(self, channel: discord.TextChannel, prefix: str):
         """Post or update the encounter embed for a new wave."""
-        # Disable buttons on the previous wave's message before posting the new one
+        # Disable ALL buttons on the previous wave's message before posting the new one
         if self.encounter_message:
             try:
                 disabled_view = discord.ui.View()
                 for item in self._build_attack_view().children:
                     item.disabled = True
                     disabled_view.add_item(item)
+                # Also disable the tag button explicitly
+                tag_btn = discord.ui.Button(
+                    label="🤝 Tag a Friend",
+                    style=discord.ButtonStyle.primary,
+                    custom_id="attack_team",
+                    disabled=True,
+                )
+                disabled_view.add_item(tag_btn)
                 await self.encounter_message.edit(view=disabled_view)
             except Exception as e:
                 print(f"[WAVE] Could not disable old wave buttons: {e}")
@@ -3462,8 +3473,11 @@ class EncountersCog(commands.Cog):
         self._attack_cooldowns[user_id] = (now, 0)
 
         # Guard against attacks from a previous wave's message buttons
+        # Only applies to direct button presses (tagged_id is None) — tag flow
+        # comes via an ephemeral picker so interaction.message won't match
         if (
-            self.encounter_message
+            tagged_id is None
+            and self.encounter_message
             and hasattr(interaction, "message")
             and interaction.message
             and interaction.message.id != self.encounter_message.id
@@ -3635,15 +3649,31 @@ class EncountersCog(commands.Cog):
 
     # ── TEST COMMANDS (remove before going live) ──
 
-    @discord.app_commands.command(name="testencounter", description="[TEST] Fire a standard encounter now")
+    @discord.app_commands.command(name="testencounter", description="[TEST] Fire a low-HP encounter in the test channel")
     async def test_encounter(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🧪 Spawning test encounter...", ephemeral=True)
-        asyncio.create_task(self.run_encounter(boss=False))
+        cog = interaction.client.cogs.get("EncountersCog")
+        if cog and cog.test_channel_id:
+            await interaction.response.send_message(
+                f"🧪 Spawning test encounter in <#{cog.test_channel_id}>...", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "🧪 Spawning test encounter (no DISCORD_TEST_CHANNEL_ID set — using main channel)...", ephemeral=True
+            )
+        asyncio.create_task(self.run_encounter(boss=False, test_mode=True))
 
-    @discord.app_commands.command(name="testboss", description="[TEST] Fire a boss encounter now")
+    @discord.app_commands.command(name="testboss", description="[TEST] Fire a low-HP boss encounter in the test channel")
     async def test_boss(self, interaction: discord.Interaction):
-        await interaction.response.send_message("🧪 Spawning test boss encounter...", ephemeral=True)
-        asyncio.create_task(self.run_encounter(boss=True))
+        cog = interaction.client.cogs.get("EncountersCog")
+        if cog and cog.test_channel_id:
+            await interaction.response.send_message(
+                f"🧪 Spawning test boss in <#{cog.test_channel_id}>...", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "🧪 Spawning test boss (no DISCORD_TEST_CHANNEL_ID set — using main channel)...", ephemeral=True
+            )
+        asyncio.create_task(self.run_encounter(boss=True, test_mode=True))
 
 
 # ─────────────────────────────────────────────
@@ -3668,6 +3698,24 @@ class WalletCog(commands.Cog):
         try:
             db = get_supabase()
             asset_id = os.environ["GOO_ASSET_ID"]
+
+            # Gate: must hold at least one MONSTR to link
+            try:
+                holdings_check = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_monstr_holdings, wallet),
+                    timeout=20
+                )
+            except asyncio.TimeoutError:
+                holdings_check = -1  # timeout — allow through rather than block
+
+            if holdings_check == 0:
+                await interaction.followup.send(
+                    "❌ **No MONSTRs detected in that wallet.**\n\n"
+                    "You need to hold at least one MONSTR NFT to participate in $GOO Encounters.\n"
+                    "Pick one up and try again!",
+                    ephemeral=True
+                )
+                return
 
             db.table("linked_wallets").upsert({
                 "user_id":        str(interaction.user.id),
