@@ -3113,15 +3113,18 @@ class EncountersCog(commands.Cog):
 
         # Run timed encounter — handle wave transitions
         end_time = asyncio.get_event_loop().time() + ENCOUNTER_DURATION
-        while asyncio.get_event_loop().time() < end_time:
+        while True:
             await asyncio.sleep(1)
+            if asyncio.get_event_loop().time() >= end_time:
+                break  # Time expired
             state = self.active_encounter
             if state and not state.alive:
                 # Build the defeated embed BEFORE advancing — state still points to the dead wave
                 if self.encounter_message:
                     try:
                         defeated_embed = self._build_defeated_embed(state)
-                        await self.encounter_message.edit(embed=defeated_embed, view=None)
+                        await self.encounter_message.edit(embed=defeated_embed, view=discord.ui.View())
+                        print(f"[WAVE] Wave {state.wave_num} marked defeated, buttons removed")
                     except Exception as e:
                         print(f"[WAVE] Could not mark wave as defeated: {e}")
 
@@ -3132,7 +3135,9 @@ class EncountersCog(commands.Cog):
                         f"💥 **Wave {state.wave_num}/{state.total_waves}!** {state.monstr['name']} appears!"
                     )
                 else:
-                    break  # All waves cleared
+                    # All waves cleared — mark final wave defeated then close
+                    print("[WAVE] All waves cleared")
+                    break
 
         await self._close_encounter(channel, test_mode=test_mode)
 
@@ -3143,6 +3148,15 @@ class EncountersCog(commands.Cog):
             return
 
         print(f"[CLOSE] Closing encounter for {state.monstr['name']} — {len(state.damage_dealt)} attackers")
+
+        # Always mark the final wave message as defeated with buttons removed
+        if self.encounter_message:
+            try:
+                defeated_embed = self._build_defeated_embed(state)
+                await self.encounter_message.edit(embed=defeated_embed, view=discord.ui.View())
+                print("[CLOSE] Final wave marked defeated")
+            except Exception as e:
+                print(f"[CLOSE] Could not mark final wave defeated: {e}")
         payouts = state.calculate_payouts()
         print(f"[CLOSE] Payouts calculated: {payouts}")
 
