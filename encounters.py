@@ -3399,10 +3399,6 @@ class EncountersCog(commands.Cog):
             ),
             color=color,
         )
-        if state.monstr.get("image_bytes"):
-            embed.set_thumbnail(url="attachment://monstr.jpg")
-        else:
-            embed.set_thumbnail(url=state.monstr.get("image_url", ""))
         embed.set_footer(text=f"ASA #{state.monstr['asa_id']}")
         return embed
 
