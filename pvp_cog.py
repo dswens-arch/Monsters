@@ -1254,23 +1254,68 @@ class PvPCog(commands.Cog):
         double-crediting.
         """
         try:
-            await asyncio.to_thread(self._process_deposits)
+            await self._process_deposits()
         except Exception as e:
             print(f"[PVP] deposit poll error: {e}")
 
     @poll_deposits.before_loop
     async def before_poll(self):
         await self.bot.wait_until_ready()
+        await self._seed_seen_deposits()
 
-    def _process_deposits(self):
+    async def _seed_seen_deposits(self):
+        """
+        On startup, mark all existing transactions as seen so the poller
+        never credits historical deposits. Only runs if pvp_seen_deposits
+        is completely empty (i.e. first ever boot).
+        """
+        import urllib.request, json as _json
+        try:
+            db = _db()
+            existing = db.table("pvp_seen_deposits").select("tx_id").limit(1).execute()
+            if existing.data:
+                # Table already has entries — poller has run before, skip seeding
+                return
+
+            asset_id    = int(os.environ["GOO_ASSET_ID"])
+            bot_addr    = await asyncio.to_thread(_get_bot_address)
+            indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.4160.nodely.io")
+
+            url = (
+                f"{indexer_url}/v2/transactions"
+                f"?asset-id={asset_id}"
+                f"&address={bot_addr}"
+                f"&address-role=receiver"
+                f"&limit=200"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = _json.loads(r.read())
+
+            rows = [
+                {"tx_id": txn["id"], "note": "seeded on startup"}
+                for txn in data.get("transactions", [])
+                if txn.get("id")
+            ]
+            if rows:
+                db.table("pvp_seen_deposits").insert(rows).execute()
+                print(f"[PVP] seeded {len(rows)} existing transactions — historical deposits will not be credited")
+            else:
+                # No transactions yet — insert a sentinel so we know seeding ran
+                db.table("pvp_seen_deposits").insert({"tx_id": "__seeded__", "note": "startup seed, no txns"}).execute()
+                print("[PVP] deposit seed complete — no prior transactions found")
+        except Exception as e:
+            print(f"[PVP] deposit seed failed: {e}")
+
+    async def _process_deposits(self):
         import urllib.request, json as _json
 
         asset_id    = int(os.environ["GOO_ASSET_ID"])
-        bot_addr    = _get_bot_address()
+        bot_addr    = await asyncio.to_thread(_get_bot_address)
         indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.4160.nodely.io")
         db          = _db()
 
-        # Load seen tx IDs (last 500 stored in Supabase to survive restarts)
+        # Load seen tx IDs (stored in Supabase to survive restarts)
         seen_rows = db.table("pvp_seen_deposits").select("tx_id").execute()
         seen_ids  = {r["tx_id"] for r in seen_rows.data} if seen_rows.data else set()
 
@@ -1322,7 +1367,7 @@ class PvPCog(commands.Cog):
 
             print(f"[PVP] deposit credited uid={user_id} amount={amount} new_bal={new_bal} tx={tx_id[:16]}")
 
-            # Notify user in PvP channel
+            # Notify user in PvP channel (now safe — we are on the event loop)
             asyncio.ensure_future(self._notify_deposit(user_id, amount, new_bal))
 
     async def _notify_deposit(self, user_id: str, amount: int, new_bal: int):
