@@ -25,8 +25,9 @@ class MonstrsBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Load encounters cog
+        # Load cogs
         await self.load_extension("encounters")
+        await self.load_extension("pvp_cog")
 
         # Sync slash commands to your guild instantly (vs global which takes up to 1hr)
         guild = discord.Object(id=GUILD_ID)
