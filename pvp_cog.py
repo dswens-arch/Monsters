@@ -169,7 +169,7 @@ def _get_bot_address() -> str:
 def _verify_ownership(asa_id: str, wallet_address: str) -> bool:
     import urllib.request, json as _json
     try:
-        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.4160.nodely.io")
+        indexer_url = os.environ["INDEXER_URL"]
         url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=8) as r:
@@ -1279,7 +1279,7 @@ class PvPCog(commands.Cog):
 
             asset_id    = int(os.environ["GOO_ASSET_ID"])
             bot_addr    = await asyncio.to_thread(_get_bot_address)
-            indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.4160.nodely.io")
+            indexer_url = os.environ["INDEXER_URL"]
 
             url = (
                 f"{indexer_url}/v2/transactions"
@@ -1312,7 +1312,7 @@ class PvPCog(commands.Cog):
 
         asset_id    = int(os.environ["GOO_ASSET_ID"])
         bot_addr    = await asyncio.to_thread(_get_bot_address)
-        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.4160.nodely.io")
+        indexer_url = os.environ["INDEXER_URL"]
         db          = _db()
 
         # Load seen tx IDs (stored in Supabase to survive restarts)
