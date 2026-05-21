@@ -341,18 +341,287 @@ def _credit_win(db, user_id: str, amount: int, duel_id: int):
 
 
 # ─────────────────────────────────────────────
+# BOARD STATE  (in-memory, one active queue slot)
+# ─────────────────────────────────────────────
+
+class BoardState:
+    """
+    Singleton tracking the current PvP board state.
+    board_msg_id — the Discord message ID of the current persistent board.
+    challenger   — dict with keys: user_id, asa_id, stats (MonstrStats), username
+    """
+    def __init__(self):
+        self.board_msg_id: Optional[int]  = None
+        self.challenger:   Optional[dict] = None
+
+    def reset(self):
+        self.challenger = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.challenger is None
+
+_board = BoardState()
+
+
+# ─────────────────────────────────────────────
+# MONSTR PICKER VIEW  (ephemeral — only sender sees)
+# ─────────────────────────────────────────────
+
+class MonstrPickerView(discord.ui.View):
+    """
+    Shows up to 5 MONSTR buttons from the user's registered MONSTRs
+    plus a 6th 'Enter ASA ID' button.
+    Fires join_callback(interaction, asa_id) when a choice is made.
+    """
+    def __init__(self, monstr_rows: list[dict], join_callback):
+        super().__init__(timeout=120)
+        self._cb = join_callback
+
+        for row in monstr_rows[:5]:
+            btn = discord.ui.Button(
+                label    = row["monstr_name"],
+                style    = discord.ButtonStyle.primary,
+                custom_id= f"pick_{row['asa_id']}",
+            )
+            btn.callback = self._make_pick_cb(row["asa_id"])
+            self.add_item(btn)
+
+        # 6th button — manual entry via modal
+        manual = discord.ui.Button(
+            label    = "Enter ASA ID",
+            style    = discord.ButtonStyle.secondary,
+            custom_id= "pick_manual",
+            row      = 1,
+        )
+        manual.callback = self._manual_cb
+        self.add_item(manual)
+
+    def _make_pick_cb(self, asa_id: str):
+        async def cb(interaction: discord.Interaction):
+            await self._cb(interaction, asa_id)
+        return cb
+
+    async def _manual_cb(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ASAModal(self._cb))
+
+
+class ASAModal(discord.ui.Modal, title="Enter your MONSTR ASA ID"):
+    asa_id = discord.ui.TextInput(
+        label       = "ASA ID",
+        placeholder = "e.g. 1234567890",
+        min_length  = 5,
+        max_length  = 20,
+    )
+
+    def __init__(self, join_callback):
+        super().__init__()
+        self._cb = join_callback
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self._cb(interaction, self.asa_id.value.strip())
+
+
+# ─────────────────────────────────────────────
+# PERSISTENT JOIN BUTTON VIEW
+# ─────────────────────────────────────────────
+
+class JoinBattleView(discord.ui.View):
+    """
+    Persistent view attached to the board message.
+    Registered with bot so it survives restarts.
+    """
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label     = "⚔️ Join Battle",
+        style     = discord.ButtonStyle.danger,
+        custom_id = "pvp_join_battle",
+    )
+    async def join_battle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _handle_join(interaction)
+
+
+# ─────────────────────────────────────────────
+# JOIN HANDLER  (called by button)
+# ─────────────────────────────────────────────
+
+async def _handle_join(interaction: discord.Interaction):
+    """
+    Ephemeral flow triggered when someone taps Join Battle.
+    1. Check they have a linked wallet and GOO balance
+    2. Show their registered MONSTRs as buttons (+ manual entry)
+    3. On MONSTR pick → if board empty become challenger, else trigger battle
+    """
+    await interaction.response.defer(ephemeral=True)
+    user_id = str(interaction.user.id)
+    db      = _db()
+
+    # Must have a linked wallet
+    wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
+    if not wallet:
+        await interaction.followup.send(
+            "❌ You need to link your wallet first. Use .", ephemeral=True
+        )
+        return
+
+    # Must have enough GOO balance
+    balance = _get_balance(db, user_id)
+    if balance < GOO_WAGER_1V1:
+        bot_addr = await asyncio.to_thread(_get_bot_address)
+        await interaction.followup.send(
+            f"❌ You need **{GOO_WAGER_1V1:,} $GOO** to join. You have {balance:,}. Deposit with /pvp_deposit.",
+            ephemeral=True
+        )
+        return
+
+    # Can't fight yourself
+    if not _board.is_empty and _board.challenger["user_id"] == user_id:
+        await interaction.followup.send(
+            "You're already waiting for an opponent! Hang tight.", ephemeral=True
+        )
+        return
+
+    # Fetch their registered MONSTRs
+    rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name")              .eq("owner_id", user_id).limit(5).execute()
+
+    if not rows.data:
+        await interaction.followup.send(
+            "❌ You haven't registered any MONSTRs yet. Use  to get started.",
+            ephemeral=True
+        )
+        return
+
+    async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
+        await _on_monstr_picked(pick_interaction, asa_id, user_id, db)
+
+    view = MonstrPickerView(rows.data, on_pick)
+    await interaction.followup.send(
+        f"**Choose your MONSTR** ({balance:,} $GOO available):",
+        view   = view,
+        ephemeral = True,
+    )
+
+
+async def _on_monstr_picked(interaction: discord.Interaction,
+                             asa_id: str, user_id: str, db):
+    """Called after a player picks their MONSTR. Either queues them or starts a battle."""
+    await interaction.response.defer(ephemeral=True)
+
+    # Validate MONSTR
+    if str(asa_id) not in MONSTR_ASSETS:
+        await interaction.followup.send(
+            f"❌  isn't a recognised MONSTR ASA ID.", ephemeral=True
+        )
+        return
+
+    row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
+    if not row.data:
+        await interaction.followup.send(
+            f"❌ That MONSTR isn't registered for PvP yet. Use  first.",
+            ephemeral=True
+        )
+        return
+    if row.data[0]["owner_id"] != user_id:
+        await interaction.followup.send("❌ That MONSTR isn't yours.", ephemeral=True)
+        return
+
+    stats = _load_stats(asa_id, user_id)
+    if not stats:
+        await interaction.followup.send("❌ Couldn't load MONSTR stats. Try again.", ephemeral=True)
+        return
+
+    username = interaction.user.display_name
+
+    if _board.is_empty:
+        # ── First player — become challenger ──
+        _board.challenger = {
+            "user_id":  user_id,
+            "asa_id":   str(asa_id),
+            "stats":    stats,
+            "username": username,
+        }
+        await interaction.followup.send(
+            f"✅ **{stats.name}** is in the arena! Waiting for an opponent...",
+            ephemeral=True
+        )
+        # Update board image to waiting state
+        channel = interaction.channel
+        await _update_board(channel, "waiting")
+
+    else:
+        # ── Second player — start battle ──
+        if _board.challenger["user_id"] == user_id:
+            await interaction.followup.send(
+                "You're already waiting for an opponent!", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ **{stats.name}** enters the arena! Battle starting...",
+            ephemeral=True
+        )
+
+        challenger = _board.challenger
+        _board.reset()
+
+        # Run battle via the cog — need a reference, use bot
+        cog: PvPCog = interaction.client.cogs.get("PvPCog")
+        if cog:
+            await cog._run_board_battle(
+                channel    = interaction.channel,
+                db         = db,
+                chal_id    = challenger["user_id"],
+                chal_asa   = challenger["asa_id"],
+                chal_stats = challenger["stats"],
+                chal_uname = challenger["username"],
+                opp_id     = user_id,
+                opp_asa    = str(asa_id),
+                opp_stats  = stats,
+                opp_uname  = username,
+            )
+
+
+# ─────────────────────────────────────────────
+# BOARD UPDATE HELPER
+# ─────────────────────────────────────────────
+
+async def _update_board(channel, state: str,
+                        p1=None, p2=None, status_text: str = ""):
+    """
+    Edit the persistent board message image in-place.
+    Falls back to posting a new message if board_msg_id is lost.
+    """
+    buf = await asyncio.to_thread(render_board, state, p1, p2, status_text)
+    file = discord.File(buf, filename="board.png")
+
+    try:
+        if _board.board_msg_id:
+            msg = await channel.fetch_message(_board.board_msg_id)
+            await msg.edit(attachments=[file], view=JoinBattleView())
+            return
+    except Exception:
+        pass
+
+    # Post fresh if message not found
+    msg = await channel.send(file=file, view=JoinBattleView())
+    _board.board_msg_id = msg.id
+
+
+# ─────────────────────────────────────────────
 # COG
 # ─────────────────────────────────────────────
 
 class PvPCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # In-memory pending duels: { challenger_discord_id: { duel_id, opp_id, asa_id, ... } }
         self._pending_duels: dict[str, dict] = {}
-        # Track last-seen deposit tx round to avoid double-crediting
         self._last_deposit_round: int = 0
         self.poll_deposits.start()
         self.expire_challenges.start()
+        # Register persistent view so it survives restarts
+        self.bot.add_view(JoinBattleView())
 
     def cog_unload(self):
         self.poll_deposits.cancel()
@@ -503,15 +772,15 @@ class PvPCog(commands.Cog):
             )
 
     # ─────────────────────────────────────────
+    # ─────────────────────────────────────────
     # /pvp_register
     # ─────────────────────────────────────────
 
     @discord.app_commands.command(
         name="pvp_register",
-        description="Register a MONSTR for PvP battles and lock in its starting stats"
+        description="Register a MONSTR for PvP battles"
     )
-    @discord.app_commands.describe(asa_id="The ASA ID of your MONSTR NFT")
-    async def pvp_register(self, interaction: discord.Interaction, asa_id: str):
+    async def pvp_register(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction):
             return
         await interaction.response.defer(ephemeral=True)
@@ -524,6 +793,49 @@ class PvPCog(commands.Cog):
                 "❌ Link your wallet first with `/link`.", ephemeral=True
             )
             return
+
+        await interaction.followup.send(
+            "🔍 Checking your wallet for MONSTRs...", ephemeral=True
+        )
+
+        try:
+            holdings = await asyncio.wait_for(
+                asyncio.to_thread(fetch_monstr_holdings, wallet), timeout=20
+            )
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ Couldn't reach the chain. Try again in a moment."
+            )
+            return
+
+        if not holdings:
+            await interaction.edit_original_response(
+                content="❌ No MONSTRs found in your linked wallet."
+            )
+            return
+
+        # Build picker rows from on-chain holdings (top 5)
+        monstr_rows = [
+            {
+                "asa_id":       str(asa),
+                "monstr_name":  MONSTR_ASSETS.get(str(asa), (f"MONSTR ...{str(asa)[-4:]}",))[0]
+            }
+            for asa in holdings[:5]
+        ]
+
+        async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
+            await self._do_register(pick_interaction, asa_id, user_id, wallet)
+
+        view = MonstrPickerView(monstr_rows, on_pick)
+        await interaction.edit_original_response(
+            content="**Choose a MONSTR to register for PvP:**",
+            view=view
+        )
+
+    async def _do_register(self, interaction: discord.Interaction,
+                            asa_id: str, user_id: str, wallet: str):
+        """Complete registration after MONSTR is chosen."""
+        await interaction.response.defer(ephemeral=True)
 
         if str(asa_id) not in MONSTR_ASSETS:
             await interaction.followup.send(
@@ -558,7 +870,7 @@ class PvPCog(commands.Cog):
 
         if not owns:
             await interaction.followup.send(
-                f"❌ **{monstr_name}** wasn't found in your linked wallet (`{wallet[:8]}...`).",
+                f"❌ **{monstr_name}** wasn't found in your wallet (`{wallet[:8]}...`).",
                 ephemeral=True
             )
             return
@@ -591,7 +903,6 @@ class PvPCog(commands.Cog):
         embed.set_footer(text=f"Trait bonus locked — ATK +{atk_b}  DEF +{def_b}  SPD +{spd_b}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ─────────────────────────────────────────
     # /pvp_upgrade
     # ─────────────────────────────────────────
 
@@ -1291,6 +1602,86 @@ class PvPCog(commands.Cog):
             content=summary or None,
             file=discord.File(result_buf, filename="result.png")
         )
+
+    # ─────────────────────────────────────────
+    # /pvp_setupboard — admin, posts persistent board
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_setupboard",
+        description="(Admin) Post the persistent PvP battle board in this channel"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def pvp_setupboard(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+        file = discord.File(buf, filename="board.png")
+        msg  = await interaction.channel.send(file=file, view=JoinBattleView())
+        _board.board_msg_id = msg.id
+        _board.reset()
+
+        await interaction.followup.send(
+            f"✅ Battle board posted (msg ID: ). Pin it to keep it visible.",
+            ephemeral=True
+        )
+
+    # ─────────────────────────────────────────
+    # BOARD BATTLE RUNNER (called from button flow)
+    # ─────────────────────────────────────────
+
+    async def _run_board_battle(self, channel, db,
+                                chal_id: str, chal_asa: str,
+                                chal_stats: MonstrStats, chal_uname: str,
+                                opp_id: str, opp_asa: str,
+                                opp_stats: MonstrStats, opp_uname: str):
+        """Full battle flow triggered from the Join Battle button."""
+
+        # Update board to active state
+        bp1 = _to_board_player(chal_stats, chal_uname)
+        bp2 = _to_board_player(opp_stats,  opp_uname)
+        await _update_board(channel, "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
+
+        # Create duel record
+        duel_result = db.table("pvp_duels").insert({
+            "challenger_id":  chal_id,
+            "opponent_id":    opp_id,
+            "challenger_asa": chal_asa,
+            "opponent_asa":   opp_asa,
+            "room":           "goo",
+            "wager_amount":   GOO_WAGER_1V1,
+            "status":         "active",
+            "expires_at":     (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }).execute()
+        duel_id = duel_result.data[0]["id"]
+
+        await asyncio.sleep(2)
+
+        # Lock wagers
+        if not _lock_wager(db, chal_id, GOO_WAGER_1V1, duel_id):
+            await channel.send(f"❌ Couldn't lock <@{chal_id}>'s wager. Duel cancelled.")
+            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await _update_board(channel, "waiting", None, None, "No active challenge")
+            return
+
+        if not _lock_wager(db, opp_id, GOO_WAGER_1V1, duel_id):
+            _refund_wager(db, chal_id, GOO_WAGER_1V1, duel_id, "opp failed")
+            await channel.send(f"❌ Couldn't lock <@{opp_id}>'s wager. Challenger refunded.")
+            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await _update_board(channel, "waiting", None, None, "No active challenge")
+            return
+
+        # Run battle
+        await self._run_and_post_battle(
+            channel, db, duel_id,
+            chal_stats, opp_stats, chal_id, opp_id
+        )
+
+        # Reset board to empty after brief pause
+        await asyncio.sleep(4)
+        await _update_board(channel, "waiting", None, None, "No active challenge")
 
     async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
         """Fire on-chain GOO send to winner's linked wallet. Best-effort — balance already credited."""
