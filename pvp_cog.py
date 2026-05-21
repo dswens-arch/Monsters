@@ -39,6 +39,8 @@ from pvp_engine import (
     STAT_BASE, STAT_MAX,
 )
 from encounters import MONSTR_ASSETS, send_goo, has_opted_in
+from pvp_board import BoardPlayer, render_board
+from pvp_board_result import WinnerInfo, render_result
 
 
 # ─────────────────────────────────────────────
@@ -220,6 +222,34 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
     except Exception as e:
         print(f"[PVP] load_stats failed asa={asa_id}: {e}")
         return None
+
+
+# ─────────────────────────────────────────────
+# BOARD HELPERS
+# ─────────────────────────────────────────────
+
+def _to_board_player(stats: MonstrStats, username: str) -> BoardPlayer:
+    """Convert MonstrStats to BoardPlayer for board rendering."""
+    return BoardPlayer(
+        monstr_name = stats.name,
+        username    = username,
+        attack      = stats.attack,
+        defense     = stats.defense,
+        speed       = stats.speed,
+        hp          = stats.hp,
+        image_url   = stats.image_url,
+    )
+
+
+async def _get_display_name(guild, user_id: str) -> str:
+    """Get a user display name from guild, fallback to user_id."""
+    try:
+        member = guild.get_member(int(user_id))
+        if member:
+            return member.display_name
+    except Exception:
+        pass
+    return f"user_{user_id[-4:]}"
 
 
 # ─────────────────────────────────────────────
@@ -860,15 +890,16 @@ class PvPCog(commands.Cog):
         }).eq("id", duel_id).execute()
         self._pending_duels.pop(chal_id, None)
 
+        # Post active board
+        chal_uname = await _get_display_name(interaction.guild, chal_id)
+        opp_uname  = await _get_display_name(interaction.guild, user_id)
+        bp1 = _to_board_player(a_stats, chal_uname)
+        bp2 = _to_board_player(b_stats, opp_uname)
+        board_buf = await asyncio.to_thread(render_board,
+            "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
         await interaction.followup.send(
-            embed=discord.Embed(
-                title="⚔️ Battle Starting!",
-                description=(
-                    f"**{a_stats.name}** (<@{chal_id}>) vs "
-                    f"**{b_stats.name}** (<@{user_id}>)\n\nResolving combat..."
-                ),
-                color=0xe67e22
-            )
+            content=f"⚔️ **{a_stats.name}** vs **{b_stats.name}** — Battle starting!",
+            file=discord.File(board_buf, filename="battle.png")
         )
         await asyncio.sleep(2)
 
@@ -979,22 +1010,20 @@ class PvPCog(commands.Cog):
 
         challenge_id = result.data[0]["id"]
 
-        embed = discord.Embed(
-            title="📋 Open Challenge Posted!",
-            description=(
-                f"<@{user_id}> is looking for a fight!\n\n"
-                f"**MONSTR:** {monstr_name}\n"
-                f"**Format:** 1v1  •  **Room:** GOO\n"
-                f"**Wager:** {GOO_WAGER_1V1:,} $GOO each  →  winner takes {GOO_WINNER_CUT_1V1:,} $GOO\n\n"
+        # Post waiting board with challenger's MONSTR
+        poster_uname = await _get_display_name(interaction.guild, user_id)
+        poster_stats = _load_stats(asa_id, user_id)
+        bp1 = _to_board_player(poster_stats, poster_uname) if poster_stats else None
+        board_buf = await asyncio.to_thread(render_board,
+            "waiting", bp1, None, "Waiting for opponent...")
+        await interaction.followup.send(
+            content=(
+                f"📋 <@{user_id}> posted an open challenge!\n"
+                f"**Wager:** {GOO_WAGER_1V1:,} $GOO  •  **Winner takes:** {GOO_WINNER_CUT_1V1:,} $GOO\n"
                 f"Accept with: `/pvp_accept_challenge {challenge_id} [your_asa_id]`"
             ),
-            color=0x3498db
+            file=discord.File(board_buf, filename="challenge.png")
         )
-        if str(asa_id) in MONSTR_ASSETS:
-            cid = MONSTR_ASSETS[str(asa_id)][1]
-            embed.set_thumbnail(url=f"https://dweb.link/ipfs/{cid}")
-        embed.set_footer(text=f"Challenge #{challenge_id}  •  Expires in {CHALLENGE_TTL_HOURS}h")
-        await interaction.followup.send(embed=embed)
 
     # ─────────────────────────────────────────
     # /pvp_challenges — view board
@@ -1149,15 +1178,16 @@ class PvPCog(commands.Cog):
             "duel_id":     duel_id,
         }).eq("id", challenge_id).execute()
 
+        # Post active board
+        poster_uname = await _get_display_name(interaction.guild, poster_id)
+        acc_uname    = await _get_display_name(interaction.guild, user_id)
+        bp1 = _to_board_player(a_stats, poster_uname)
+        bp2 = _to_board_player(b_stats, acc_uname)
+        board_buf = await asyncio.to_thread(render_board,
+            "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
         await interaction.followup.send(
-            embed=discord.Embed(
-                title="⚔️ Challenge Accepted — Battle Starting!",
-                description=(
-                    f"**{a_stats.name}** (<@{poster_id}>) vs "
-                    f"**{b_stats.name}** (<@{user_id}>)\n\nResolving combat..."
-                ),
-                color=0xe67e22
-            )
+            content=f"⚔️ **{a_stats.name}** vs **{b_stats.name}** — Challenge accepted!",
+            file=discord.File(board_buf, filename="battle.png")
         )
         await asyncio.sleep(2)
 
@@ -1219,8 +1249,48 @@ class PvPCog(commands.Cog):
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", duel_id).execute()
 
-        embed = _build_battle_embed(result, a, b, wager, duel_id)
-        await channel.send(embed=embed)
+        # Post result board
+        if result.is_draw:
+            winner_stats = a
+            winner_uname = "draw"
+        else:
+            winner_stats = a if result.winner_asa == a.asa_id else b
+            loser_stats  = b if result.winner_asa == a.asa_id else a
+            # Get display name from guild
+            guild = channel.guild
+            winner_uname = await _get_display_name(guild, winner_stats.owner_id)
+
+        if result.is_draw:
+            win_info = WinnerInfo(
+                monstr_name  = a.name,
+                username     = "draw",
+                attack=a.attack, defense=a.defense, speed=a.speed, hp=a.hp,
+                total_rounds = result.total_rounds,
+                wager_won    = 0,
+                image_url    = None,
+                is_draw      = True,
+            )
+        else:
+            win_info = WinnerInfo(
+                monstr_name  = winner_stats.name,
+                username     = winner_uname,
+                attack       = winner_stats.attack,
+                defense      = winner_stats.defense,
+                speed        = winner_stats.speed,
+                hp           = winner_stats.hp,
+                total_rounds = result.total_rounds,
+                wager_won    = GOO_WINNER_CUT_1V1,
+                image_url    = winner_stats.image_url,
+                is_draw      = False,
+            )
+
+        result_buf = await asyncio.to_thread(render_result, win_info)
+        summary_lines = [r.flavor for r in result.rounds[-5:]]
+        summary = "\n".join(summary_lines) if summary_lines else ""
+        await channel.send(
+            content=summary or None,
+            file=discord.File(result_buf, filename="result.png")
+        )
 
     async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
         """Fire on-chain GOO send to winner's linked wallet. Best-effort — balance already credited."""
