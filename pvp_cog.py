@@ -185,6 +185,37 @@ def _verify_ownership(asa_id: str, wallet_address: str) -> bool:
         return False
 
 
+
+def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
+    """
+    Return list of MONSTR ASA IDs held by wallet_address (amount > 0).
+    Uses MONSTR_ASSETS registry as the source of truth for valid ASA IDs.
+    """
+    import urllib.request, json as _json
+    try:
+        indexer_url = os.environ["INDEXER_URL"]
+        url = (
+            f"{indexer_url}/v2/accounts/{wallet_address}/assets"
+            f"?include-all=false&limit=1000"
+        )
+        req = urllib.request.Request(url, headers={
+            "User-Agent":           "Mozilla/5.0",
+            "X-Indexer-API-Token":  os.getenv("INDEXER_TOKEN", ""),
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+
+        held = []
+        for asset in data.get("assets", []):
+            asa = str(asset.get("asset-id", ""))
+            if asa in MONSTR_ASSETS and asset.get("amount", 0) > 0:
+                held.append(asa)
+        return held
+    except Exception as e:
+        print(f"[PVP] fetch_monstr_asa_ids failed {wallet_address[:8]}...: {e}")
+        return []
+
+
 # ─────────────────────────────────────────────
 # TRAIT BONUS (deterministic, non-gameable)
 # ─────────────────────────────────────────────
@@ -799,16 +830,16 @@ class PvPCog(commands.Cog):
         )
 
         try:
-            holdings = await asyncio.wait_for(
-                asyncio.to_thread(fetch_monstr_holdings, wallet), timeout=20
+            asa_ids = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_monstr_asa_ids, wallet), timeout=20
             )
         except Exception as e:
             await interaction.edit_original_response(
-                content=f"❌ Couldn't reach the chain. Try again in a moment."
+                content="❌ Couldn't reach the chain. Try again in a moment."
             )
             return
 
-        if not holdings:
+        if not asa_ids:
             await interaction.edit_original_response(
                 content="❌ No MONSTRs found in your linked wallet."
             )
@@ -817,10 +848,10 @@ class PvPCog(commands.Cog):
         # Build picker rows from on-chain holdings (top 5)
         monstr_rows = [
             {
-                "asa_id":       str(asa),
-                "monstr_name":  MONSTR_ASSETS.get(str(asa), (f"MONSTR ...{str(asa)[-4:]}",))[0]
+                "asa_id":      asa,
+                "monstr_name": MONSTR_ASSETS.get(asa, (f"MONSTR ...{asa[-4:]}",))[0]
             }
-            for asa in holdings[:5]
+            for asa in asa_ids[:5]
         ]
 
         async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
