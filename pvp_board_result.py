@@ -19,8 +19,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 RESULT_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "battlegame_winner.png")
 
-OUTPUT_W = 800
-OUTPUT_H = 1067
+OUTPUT_W = 1400
+OUTPUT_H = 1875
 SCALE    = OUTPUT_W / 3584
 
 def _s(v): return int(v * SCALE)
@@ -38,7 +38,7 @@ WIN_TEXT_H = WIN_TEXT[3] - WIN_TEXT[1]
 COL_WHITE  = (255, 255, 255, 255)
 COL_YELLOW = (255, 220, 50,  255)
 COL_GREEN  = (80,  255, 120, 255)
-COL_GREY   = (210, 210, 210, 255)
+COL_GREY   = (235, 235, 235, 255)
 
 FONT_NAME  = int(OUTPUT_W * 0.050)
 FONT_USER  = int(OUTPUT_W * 0.036)
