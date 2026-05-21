@@ -641,6 +641,28 @@ async def _update_board(channel, state: str,
 # COG
 # ─────────────────────────────────────────────
 
+
+def _get_bot_goo_balance() -> int:
+    """Return the bot wallet's current $GOO balance via algod."""
+    import urllib.request, json as _json
+    try:
+        asset_id  = int(os.environ["GOO_ASSET_ID"])
+        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        bot_addr  = _get_bot_address()
+        url = f"{algod_url}/v2/accounts/{bot_addr}/assets/{asset_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent":       "Mozilla/5.0",
+            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+        })
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = _json.loads(r.read())
+        return data.get("asset-holding", {}).get("amount", 0)
+    except Exception as e:
+        if "404" not in str(e):
+            print(f"[PVP] bot GOO balance check failed: {e}")
+        return 0
+
+
 class PvPCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1853,26 +1875,6 @@ class PvPCog(commands.Cog):
                 asyncio.ensure_future(self._notify_unmatched_deposit(amt))
 
         self._last_bot_goo = current_bal
-
-def _get_bot_goo_balance() -> int:
-    """Return the bot wallet's current $GOO balance via algod."""
-    import urllib.request, json as _json
-    try:
-        asset_id  = int(os.environ["GOO_ASSET_ID"])
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        bot_addr  = _get_bot_address()
-        url = f"{algod_url}/v2/accounts/{bot_addr}/assets/{asset_id}"
-        req = urllib.request.Request(url, headers={
-            "User-Agent":       "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = _json.loads(r.read())
-        return data.get("asset-holding", {}).get("amount", 0)
-    except Exception as e:
-        if "404" not in str(e):
-            print(f"[PVP] bot GOO balance check failed: {e}")
-        return 0
 
 
     async def _notify_deposit(self, user_id: str, amount: int, new_bal: int):
