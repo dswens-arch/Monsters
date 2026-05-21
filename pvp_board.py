@@ -33,12 +33,12 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "battlegame.png")
 
-# Output size — scale down for Discord (keep 4:5 ratio, 3584x4800 → 800x1067)
-OUTPUT_W = 800
-OUTPUT_H = 1067
+# Output size — 1400px wide renders crisply in Discord at full embed width
+OUTPUT_W = 1400
+OUTPUT_H = 1875
 
 # Scale factor from template to output
-SCALE = OUTPUT_W / 3584  # ~0.2232
+SCALE = OUTPUT_W / 3584  # ~0.3906
 
 # ─────────────────────────────────────────────
 # ZONE COORDINATES (template space → scaled)
@@ -76,17 +76,17 @@ COL_WHITE      = (255, 255, 255, 255)
 COL_YELLOW     = (255, 220, 50,  255)
 COL_RED        = (255, 60,  60,  255)
 COL_GREEN      = (80,  255, 120, 255)
-COL_GREY       = (160, 160, 160, 255)
+COL_GREY       = (230, 230, 230, 255)
 COL_BLACK      = (0,   0,   0,   255)
 COL_WAITING_BG = (30,  20,  40,  200)
 COL_WIN_GLOW   = (255, 215, 0,   180)
 
 # Font sizes (output space)
-FONT_NAME   = int(OUTPUT_W * 0.045)   # ~36px — MONSTR name
-FONT_USER   = int(OUTPUT_W * 0.032)   # ~26px — @username
-FONT_STAT   = int(OUTPUT_W * 0.026)   # ~21px — stat values
-FONT_WAIT   = int(OUTPUT_W * 0.038)   # ~30px — "Waiting..."
-FONT_WIN    = int(OUTPUT_W * 0.055)   # ~44px — "WINNER!"
+FONT_NAME   = int(OUTPUT_W * 0.048)   # ~67px — MONSTR name
+FONT_USER   = int(OUTPUT_W * 0.036)   # ~50px — @username
+FONT_STAT   = int(OUTPUT_W * 0.028)   # ~39px — stat values
+FONT_WAIT   = int(OUTPUT_W * 0.042)   # ~59px — "Waiting..."
+FONT_WIN    = int(OUTPUT_W * 0.058)   # ~81px — "WINNER!"
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
