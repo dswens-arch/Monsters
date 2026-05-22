@@ -1218,6 +1218,9 @@ class PvPCog(commands.Cog):
         status_msg = await channel.send(_status())
 
         # Post all rounds with delays, updating status bar after each
+        # Single round-by-round message that edits itself
+        round_msg = await channel.send("⚔️ Battle starting...")
+
         for r in result.rounds:
             # Update HP tracking
             if r.attacker_id == a.asa_id:
@@ -1225,10 +1228,11 @@ class PvPCog(commands.Cog):
             else:
                 hp_a = r.defender_hp
 
-            await channel.send(r.flavor)
+            # Edit single message with latest round flavor
+            await round_msg.edit(content=r.flavor)
             await status_msg.edit(content=_status())
             await asyncio.sleep(1.5)
-            
+
             if r.defender_hp <= 0:
                 break
 
@@ -1360,9 +1364,10 @@ class PvPCog(commands.Cog):
             chal_stats, opp_stats, chal_id, opp_id
         )
 
-        # Wait then reset board for next battle
-        await asyncio.sleep(8)
+        # Post fresh empty board as new message after 4 seconds
+        await asyncio.sleep(4)
         _board.reset()
+        _board.board_msg_id = None
         await _update_board(channel, "waiting", None, None, "No active challenge")
 
 
