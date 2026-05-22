@@ -244,17 +244,18 @@ def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
 def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
     """
     Resolve the current live image URL for an ARC-19 MONSTR.
-    Uses encounters.decode_arc19_reserve for CID decoding.
-    Returns a gateway URL string suitable for storage.
+    Mirrors fetch_live_image_url from encounters but returns URL string only.
     """
     import urllib.request, json as _json
+    from encounters import decode_arc19_reserve
     try:
-        from encounters import decode_arc19_reserve
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        indexer_url = os.environ["INDEXER_URL"]
 
         # Step 1: Get ASA params
-        url = f"{algod_url}/v2/assets/{asa_id}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        url = f"{indexer_url}/v2/assets/{asa_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Accept": "application/json"
+        })
         with urllib.request.urlopen(req, timeout=10) as r:
             data = _json.loads(r.read())
 
@@ -262,7 +263,7 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
         asset_url = params.get("url", "")
         reserve   = params.get("reserve", "")
 
-        # Step 2: Get metadata CID
+        # Step 2: Decode reserve → metadata CID
         metadata_cid = None
         if "template-ipfs" in asset_url and reserve:
             metadata_cid = decode_arc19_reserve(reserve)
@@ -270,15 +271,15 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
             metadata_cid = asset_url.replace("ipfs://", "")
 
         if not metadata_cid:
-            print(f"[PVP] Could not resolve metadata CID for ASA {asa_id}")
+            print(f"[PVP] No metadata CID for ASA {asa_id}")
             return None
 
         # Step 3: Fetch metadata JSON
         metadata = None
-        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
+        for gw in ["https://ipfs.algonode.xyz/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/"]:
             try:
                 req2 = urllib.request.Request(f"{gw}{metadata_cid}",
-                    headers={"User-Agent": "Mozilla/5.0"})
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
                 with urllib.request.urlopen(req2, timeout=10) as r:
                     metadata = _json.loads(r.read())
                 break
@@ -286,20 +287,21 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
                 continue
 
         if not metadata:
+            print(f"[PVP] Metadata fetch failed for ASA {asa_id}")
             return None
 
-        # Step 4: Return image gateway URL
+        # Step 4: Build image URL without downloading
         image_field = metadata.get("image", "")
         if not image_field:
             return None
 
         image_cid = image_field.replace("ipfs://", "")
-        url = f"https://dweb.link/ipfs/{image_cid}"
-        print(f"[PVP] Resolved image URL for ASA {asa_id}: {url[:60]}")
-        return url
+        result_url = f"https://dweb.link/ipfs/{image_cid}"
+        print(f"[PVP] Image URL resolved for ASA {asa_id}: {result_url[:60]}")
+        return result_url
 
     except Exception as e:
-        print(f"[PVP] ARC-19 image URL resolve failed asa={asa_id}: {e}")
+        print(f"[PVP] ARC-19 resolve failed asa={asa_id}: {e}")
         return None
 
 
@@ -1433,9 +1435,8 @@ class PvPCog(commands.Cog):
             # Indexer tx lookup failed (403 etc) — fall back to manual confirm
             if "403" not in str(e):
                 print(f"[PVP] deposit tx lookup error: {e}")
-            if not credited and diff > 0:
-                # Notify channel that a deposit arrived but needs manual confirmation
-                asyncio.ensure_future(self._notify_unmatched_deposit(amt))
+            # Don't notify for unmatched — could be encounters payouts or other bot activity
+            pass
 
         self._last_bot_goo = current_bal
 
