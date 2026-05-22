@@ -1223,20 +1223,38 @@ class PvPCog(commands.Cog):
             }).eq("id", duel_id).execute()
 
         # Post winner board
-        winner_m     = a if result.winner_asa == a.asa_id else b
-        guild        = channel.guild
-        winner_uname = await _get_display_name(guild, winner_m.owner_id)
-
-        win_info = WinnerInfo(
-            monstr_name  = winner_m.name if not result.is_draw else a.name,
-            username     = winner_uname  if not result.is_draw else "draw",
-            total_rounds = result.total_rounds,
-            wager_won    = GOO_WINNER_CUT_1V1 if not result.is_draw else 0,
-            image_url    = winner_m.image_url  if not result.is_draw else None,
-            is_draw      = result.is_draw,
-        )
-        result_buf = await asyncio.to_thread(render_result, win_info)
-        await channel.send(file=discord.File(result_buf, filename="result.png"))
+        try:
+            if result.is_draw:
+                win_info = WinnerInfo(
+                    monstr_name  = a.name,
+                    username     = "draw",
+                    total_rounds = result.total_rounds,
+                    wager_won    = 0,
+                    image_url    = None,
+                    is_draw      = True,
+                )
+            else:
+                winner_m     = a if result.winner_asa == a.asa_id else b
+                guild        = channel.guild
+                winner_uname = await _get_display_name(guild, winner_m.owner_id)
+                win_info = WinnerInfo(
+                    monstr_name  = winner_m.name,
+                    username     = winner_uname,
+                    total_rounds = result.total_rounds,
+                    wager_won    = GOO_WINNER_CUT_1V1,
+                    image_url    = winner_m.image_url,
+                    is_draw      = False,
+                )
+            result_buf = await asyncio.to_thread(render_result, win_info)
+            await channel.send(file=discord.File(result_buf, filename="result.png"))
+        except Exception as e:
+            print(f"[PVP] Winner board post failed: {e}")
+            # Still announce winner in text
+            if not result.is_draw:
+                winner_m = a if result.winner_asa == a.asa_id else b
+                await channel.send(f"🏆 **{winner_m.name}** wins! +{GOO_WINNER_CUT_1V1:,} $GOO")
+            else:
+                await channel.send("⚔️ Draw — wagers refunded!")
 
     # ─────────────────────────────────────────
     # BOARD BATTLE RUNNER (called from button flow)
