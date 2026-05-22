@@ -24,23 +24,48 @@ P1_TEXT = (540,  200, 1580, 580)   # right of P1 image, upper area
 P2_TEXT = (20,   640, 1060, 1020)  # left of P2 image, lower area
 
 def _font(size):
+    # Check common paths
     for p in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/root/.nix-profile/share/fonts/truetype/DejaVuSans-Bold.ttf",
+        "/app/DejaVuSans-Bold.ttf",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "DejaVuSans-Bold.ttf"),
     ]:
         if os.path.exists(p):
-            try: return ImageFont.truetype(p, size)
+            try:
+                f = ImageFont.truetype(p, size)
+                return f
             except: pass
+
+    # Download font if not found
+    font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DejaVuSans-Bold.ttf")
+    if not os.path.exists(font_path):
+        try:
+            import urllib.request
+            urllib.request.urlretrieve(
+                "https://github.com/python-pillow/Pillow/raw/main/Tests/fonts/DejaVuSans.ttf",
+                font_path
+            )
+            print(f"[PVP] Downloaded font to {font_path}")
+        except Exception as e:
+            print(f"[PVP] Font download failed: {e}")
+
+    if os.path.exists(font_path):
+        try: return ImageFont.truetype(font_path, size)
+        except: pass
+
+    print(f"[PVP] WARNING: using default font — text will be tiny!")
     return ImageFont.load_default()
 
 # Font sizes — absolute pixels on the 1600px canvas
 # Text zone is ~1040px wide, displays at ~260px on Discord (4x scale)
 # So 60px canvas = 15px visible. Need ~24px visible = 96px canvas.
-F_NAME = 9600
-F_USER = 7200
-F_STAT = 6800
-F_WAIT = 8000
+F_NAME = 52
+F_USER = 40
+F_STAT = 36
+F_WAIT = 44
 
 WHITE  = (255, 255, 255, 255)
 YELLOW = (255, 215, 50,  255)
