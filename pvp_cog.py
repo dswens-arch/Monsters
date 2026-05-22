@@ -38,7 +38,7 @@ from pvp_engine import (
     upgrade_cost, can_upgrade,
     STAT_BASE, STAT_MAX,
 )
-from encounters import MONSTR_ASSETS, send_goo, has_opted_in, fetch_live_image_url
+from encounters import MONSTR_ASSETS, send_goo, has_opted_in
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
 
@@ -235,6 +235,91 @@ def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
     except Exception as e:
         print(f"[PVP] fetch_monstr_asa_ids failed {wallet_address[:8]}...: {e}")
         return []
+
+
+# ─────────────────────────────────────────────
+# ARC-19 IMAGE URL RESOLVER
+# ─────────────────────────────────────────────
+
+def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
+    """
+    Resolve the current live image URL for an ARC-19 MONSTR.
+    Returns a gateway URL string (not bytes) suitable for storage.
+    """
+    import urllib.request, json as _json, base64
+    try:
+        indexer_url = os.environ["INDEXER_URL"]
+        algod_url   = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+
+        # Step 1: Get ASA params (url + reserve)
+        url = f"{algod_url}/v2/assets/{asa_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+
+        params  = data.get("asset", {}).get("params", {})
+        asset_url = params.get("url", "")
+        reserve   = params.get("reserve", "")
+
+        # Step 2: Decode reserve address → metadata CID (ARC-19)
+        metadata_cid = None
+        if "template-ipfs" in asset_url and reserve:
+            try:
+                from algosdk.encoding import decode_address
+                addr_bytes   = decode_address(reserve)
+                # CID is encoded in the reserve: first 2 bytes are multicodec prefix
+                cid_bytes    = bytes([0x12, 0x20]) + addr_bytes
+                metadata_cid = "f" + cid_bytes.hex()
+                # Try base32 CID (more common)
+                import base58
+                metadata_cid = base58.b58encode(cid_bytes).decode()
+            except Exception:
+                # Fallback: try direct base32 decode of reserve
+                try:
+                    padded = reserve.upper() + "=" * (-len(reserve) % 8)
+                    raw = base64.b32decode(padded)
+                    metadata_cid = "f" + raw.hex()
+                except Exception:
+                    pass
+        elif asset_url.startswith("ipfs://"):
+            metadata_cid = asset_url.replace("ipfs://", "")
+
+        if not metadata_cid:
+            return None
+
+        # Step 3: Fetch metadata JSON
+        gateways = [
+            "https://dweb.link/ipfs/",
+            "https://ipfs.io/ipfs/",
+            "https://gateway.pinata.cloud/ipfs/",
+        ]
+        metadata = None
+        for gw in gateways:
+            try:
+                req2 = urllib.request.Request(
+                    f"{gw}{metadata_cid}",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req2, timeout=10) as r:
+                    metadata = _json.loads(r.read())
+                break
+            except Exception:
+                continue
+
+        if not metadata:
+            return None
+
+        # Step 4: Extract image CID and return a gateway URL
+        image_field = metadata.get("image", "")
+        if not image_field:
+            return None
+
+        image_cid = image_field.replace("ipfs://", "")
+        return f"https://dweb.link/ipfs/{image_cid}"
+
+    except Exception as e:
+        print(f"[PVP] ARC-19 image URL resolve failed asa={asa_id}: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────
@@ -925,10 +1010,10 @@ class PvPCog(commands.Cog):
 
         atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
 
-        # Fetch current ARC-19 image URL
+        # Fetch current ARC-19 image URL (URL only, not bytes)
         try:
             live_image_url = await asyncio.wait_for(
-                fetch_live_image_url(str(asa_id)), timeout=20
+                asyncio.to_thread(_resolve_arc19_image_url, str(asa_id)), timeout=30
             )
         except Exception:
             live_image_url = None
