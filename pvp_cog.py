@@ -921,20 +921,7 @@ class PvPCog(commands.Cog):
                 )
             return
 
-        # Verify ownership
-        try:
-            owns = await asyncio.wait_for(
-                asyncio.to_thread(_verify_ownership, asa_id, wallet), timeout=60
-            )
-        except asyncio.TimeoutError:
-            owns = False
-
-        if not owns:
-            await interaction.followup.send(
-                f"❌ **{monstr_name}** wasn't found in your wallet (`{wallet[:8]}...`).",
-                ephemeral=True
-            )
-            return
+        # Ownership already confirmed via _fetch_monstr_asa_ids — skip redundant check
 
         atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
 
