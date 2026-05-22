@@ -37,12 +37,12 @@ from typing import Optional
 # CONSTANTS
 # ─────────────────────────────────────────────
 
-MAX_ROUNDS        = 20
-CRIT_CHANCE       = 0.08        # 8%
-CRIT_MULTIPLIER   = 1.75
-DAMAGE_JITTER     = 0.20        # ±20% random variance
-BASE_HP_FLAT      = 80
-BASE_HP_PER_DEF   = 3           # HP bonus per defense point
+MAX_ROUNDS        = 50
+CRIT_CHANCE       = 0.12        # 12%
+CRIT_MULTIPLIER   = 2.0
+DAMAGE_JITTER     = 0.30        # ±30% random variance
+BASE_HP_FLAT      = 40          # lower base HP so battles finish faster
+BASE_HP_PER_DEF   = 2           # HP bonus per defense point
 
 STAT_BASE         = 10
 STAT_MAX          = 50
@@ -123,12 +123,14 @@ def can_upgrade(current_stat_value: int) -> bool:
 def _calc_damage(attacker: MonstrStats, defender: MonstrStats) -> tuple[int, bool]:
     """
     Returns (damage, is_crit).
-    Base damage = max(1, ATK - DEF), then jitter, then maybe crit.
+    Base damage = ATK * 0.6, reduced by DEF * 0.3, minimum 3.
+    This ensures meaningful damage even at low stats.
     """
-    base   = max(1, attacker.attack - defender.defense)
+    base   = int(attacker.attack * 0.6) - int(defender.defense * 0.3)
+    base   = max(3, base)
     jitter = random.uniform(1 - DAMAGE_JITTER, 1 + DAMAGE_JITTER)
     dmg    = int(base * jitter)
-    dmg    = max(1, dmg)
+    dmg    = max(3, dmg)
 
     is_crit = random.random() < CRIT_CHANCE
     if is_crit:
