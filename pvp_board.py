@@ -172,13 +172,14 @@ def render_board(state: str,
 
     # ── NFT images ──────────────────────────────
     for player, zone in [(p1, P1_IMG), (p2, P2_IMG)]:
+        if not player:
+            continue  # no player — let template show through
         size = (zone[2]-zone[0], zone[3]-zone[1])
-        if player and player.image_url:
+        if player.image_url:
             nft = _fetch_nft_image(player.image_url, size)
-            img = nft if nft else _make_placeholder(size)
-        else:
-            img = _make_placeholder(size)
-        board.paste(img, (zone[0], zone[1]), img)
+            if nft:
+                board.paste(nft, (zone[0], zone[1]), nft)
+        # No image URL — still let template show through
 
     # ── Winner glow / loser dim ──────────────────
     if state == "result":
