@@ -1079,7 +1079,29 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
+    # /pvp_setupboard — post persistent board
     # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_setupboard",
+        description="(Admin) Post the persistent PvP battle board in this channel"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def pvp_setupboard(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+        file = discord.File(buf, filename="board.png")
+        msg  = await interaction.channel.send(file=file, view=JoinBattleView())
+        _board.board_msg_id = msg.id
+        _board.reset()
+
+        await interaction.followup.send(
+            f"✅ Battle board posted! Pin it to keep it visible.",
+            ephemeral=True
+        )
 
     # ─────────────────────────────────────────
     # BATTLE RUNNER — round by round with delays
