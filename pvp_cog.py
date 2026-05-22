@@ -618,7 +618,7 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         # Run battle via the cog — need a reference, use bot
         cog = interaction.client.cogs.get("PvPCog")
         if cog:
-            await cog.__run_board_battle(
+            await cog._run_board_battle(
                 channel    = interaction.channel,
                 db         = db,
                 chal_id    = challenger["user_id"],
@@ -1119,7 +1119,7 @@ class PvPCog(commands.Cog):
     # BATTLE RUNNER — round by round with delays
     # ─────────────────────────────────────────
 
-    async def __run_and_post_battle(self, channel, db: object, duel_id: int,
+    async def _run_and_post_battle(self, channel, db: object, duel_id: int,
                                     a: MonstrStats, b: MonstrStats,
                                     chal_id: str, opp_id: str):
         """Resolve full battle, post 5-8 rounds with delays, then winner board."""
@@ -1156,7 +1156,7 @@ class PvPCog(commands.Cog):
         else:
             winner_id = result.winner_owner
             _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
-            asyncio.ensure_future(self.__send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
+            asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
             db.table("pvp_duels").update({
                 "status": "complete", "winner_id": winner_id,
                 "winner_asa": result.winner_asa, "battle_log": battle_log,
@@ -1183,7 +1183,7 @@ class PvPCog(commands.Cog):
     # BOARD BATTLE RUNNER (called from button flow)
     # ─────────────────────────────────────────
 
-    async def __run_board_battle(self, channel, db: object,
+    async def _run_board_battle(self, channel, db: object,
                                  chal_id: str, chal_asa: str,
                                  chal_stats: MonstrStats, chal_uname: str,
                                  opp_id: str, opp_asa: str,
@@ -1220,7 +1220,7 @@ class PvPCog(commands.Cog):
             await _update_board(channel, "waiting", None, None, "No active challenge")
             return
 
-        await self.__run_and_post_battle(
+        await self._run_and_post_battle(
             channel, db, duel_id,
             chal_stats, opp_stats, chal_id, opp_id
         )
