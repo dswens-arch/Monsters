@@ -622,17 +622,11 @@ async def _on_monstr_picked(interaction: discord.Interaction,
     """Called after a player picks their MONSTR. Either queues them or starts a battle."""
     await interaction.response.defer(ephemeral=True)
 
-    # Validate MONSTR
-    if str(asa_id) not in MONSTR_ASSETS:
-        await interaction.followup.send(
-            f"❌  isn't a recognised MONSTR ASA ID.", ephemeral=True
-        )
-        return
-
+    # Validate MONSTR — check Supabase registration (skip MONSTR_ASSETS check)
     row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
     if not row.data:
         await interaction.followup.send(
-            f"❌ That MONSTR isn't registered for PvP yet. Use  first.",
+            f"❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first.",
             ephemeral=True
         )
         return
@@ -1218,11 +1212,25 @@ class PvPCog(commands.Cog):
             winner_id = result.winner_owner
             _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
             asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
-            db.table("pvp_duels").update({
-                "status": "complete", "winner_id": winner_id,
-                "winner_asa": result.winner_asa, "battle_log": battle_log,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", duel_id).execute()
+            try:
+                db.table("pvp_duels").update({
+                    "status": "complete", "winner_id": winner_id,
+                    "winner_asa": result.winner_asa, "battle_log": battle_log,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", duel_id).execute()
+                print(f"[PVP] Duel #{duel_id} marked complete, winner={winner_id}")
+            except Exception as e:
+                print(f"[PVP] DB update failed duel#{duel_id}: {e}")
+                # Try without battle_log in case that's the issue
+                try:
+                    db.table("pvp_duels").update({
+                        "status": "complete", "winner_id": winner_id,
+                        "winner_asa": result.winner_asa,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", duel_id).execute()
+                    print(f"[PVP] Duel #{duel_id} marked complete (without log)")
+                except Exception as e2:
+                    print(f"[PVP] DB update retry failed: {e2}")
 
         # Post winner board
         try:
