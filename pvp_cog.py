@@ -38,7 +38,7 @@ from pvp_engine import (
     upgrade_cost, can_upgrade,
     STAT_BASE, STAT_MAX,
 )
-from encounters import MONSTR_ASSETS, send_goo, has_opted_in
+from encounters import MONSTR_ASSETS, send_goo, has_opted_in, fetch_live_image_url
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
 
@@ -257,11 +257,8 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
         row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
         if not row.data:
             return None
-        r = row.data[0]
-        img = None
-        if str(asa_id) in MONSTR_ASSETS:
-            cid = MONSTR_ASSETS[str(asa_id)][1]
-            img = f"https://dweb.link/ipfs/{cid}"
+        r   = row.data[0]
+        img = r.get("image_url") or None  # stored at registration time
         return MonstrStats(
             asa_id   = r["asa_id"],
             name     = r["monstr_name"],
@@ -941,6 +938,14 @@ class PvPCog(commands.Cog):
 
         atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
 
+        # Fetch current ARC-19 image URL
+        try:
+            live_image_url = await asyncio.wait_for(
+                fetch_live_image_url(str(asa_id)), timeout=20
+            )
+        except Exception:
+            live_image_url = None
+
         db.table("monstr_pvp_stats").insert({
             "asa_id":          str(asa_id),
             "owner_id":        user_id,
@@ -951,6 +956,7 @@ class PvPCog(commands.Cog):
             "trait_bonus_atk": atk_b,
             "trait_bonus_def": def_b,
             "trait_bonus_spd": spd_b,
+            "image_url":       live_image_url or "",
         }).execute()
 
         stats = _load_stats(asa_id, user_id)
