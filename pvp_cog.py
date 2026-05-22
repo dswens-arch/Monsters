@@ -244,62 +244,41 @@ def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
 def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
     """
     Resolve the current live image URL for an ARC-19 MONSTR.
-    Returns a gateway URL string (not bytes) suitable for storage.
+    Uses encounters.decode_arc19_reserve for CID decoding.
+    Returns a gateway URL string suitable for storage.
     """
-    import urllib.request, json as _json, base64
+    import urllib.request, json as _json
     try:
-        indexer_url = os.environ["INDEXER_URL"]
-        algod_url   = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        from encounters import decode_arc19_reserve
+        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
 
-        # Step 1: Get ASA params (url + reserve)
+        # Step 1: Get ASA params
         url = f"{algod_url}/v2/assets/{asa_id}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = _json.loads(r.read())
 
-        params  = data.get("asset", {}).get("params", {})
+        params    = data.get("asset", {}).get("params", {})
         asset_url = params.get("url", "")
         reserve   = params.get("reserve", "")
 
-        # Step 2: Decode reserve address → metadata CID (ARC-19)
+        # Step 2: Get metadata CID
         metadata_cid = None
         if "template-ipfs" in asset_url and reserve:
-            try:
-                from algosdk.encoding import decode_address
-                addr_bytes   = decode_address(reserve)
-                # CID is encoded in the reserve: first 2 bytes are multicodec prefix
-                cid_bytes    = bytes([0x12, 0x20]) + addr_bytes
-                metadata_cid = "f" + cid_bytes.hex()
-                # Try base32 CID (more common)
-                import base58
-                metadata_cid = base58.b58encode(cid_bytes).decode()
-            except Exception:
-                # Fallback: try direct base32 decode of reserve
-                try:
-                    padded = reserve.upper() + "=" * (-len(reserve) % 8)
-                    raw = base64.b32decode(padded)
-                    metadata_cid = "f" + raw.hex()
-                except Exception:
-                    pass
+            metadata_cid = decode_arc19_reserve(reserve)
         elif asset_url.startswith("ipfs://"):
             metadata_cid = asset_url.replace("ipfs://", "")
 
         if not metadata_cid:
+            print(f"[PVP] Could not resolve metadata CID for ASA {asa_id}")
             return None
 
         # Step 3: Fetch metadata JSON
-        gateways = [
-            "https://dweb.link/ipfs/",
-            "https://ipfs.io/ipfs/",
-            "https://gateway.pinata.cloud/ipfs/",
-        ]
         metadata = None
-        for gw in gateways:
+        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
             try:
-                req2 = urllib.request.Request(
-                    f"{gw}{metadata_cid}",
-                    headers={"User-Agent": "Mozilla/5.0"}
-                )
+                req2 = urllib.request.Request(f"{gw}{metadata_cid}",
+                    headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req2, timeout=10) as r:
                     metadata = _json.loads(r.read())
                 break
@@ -309,13 +288,15 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
         if not metadata:
             return None
 
-        # Step 4: Extract image CID and return a gateway URL
+        # Step 4: Return image gateway URL
         image_field = metadata.get("image", "")
         if not image_field:
             return None
 
         image_cid = image_field.replace("ipfs://", "")
-        return f"https://dweb.link/ipfs/{image_cid}"
+        url = f"https://dweb.link/ipfs/{image_cid}"
+        print(f"[PVP] Resolved image URL for ASA {asa_id}: {url[:60]}")
+        return url
 
     except Exception as e:
         print(f"[PVP] ARC-19 image URL resolve failed asa={asa_id}: {e}")
@@ -1285,15 +1266,27 @@ class PvPCog(commands.Cog):
 
         await asyncio.sleep(1)
 
+        chal_bal = _get_balance(db, chal_id)
+        opp_bal  = _get_balance(db, opp_id)
+        print(f"[PVP] Wager check — chal={chal_id} bal={chal_bal}  opp={opp_id} bal={opp_bal}  wager={GOO_WAGER_1V1}")
+
         if not _lock_wager(db, chal_id, GOO_WAGER_1V1, duel_id):
-            await channel.send(f"❌ Couldn't lock <@{chal_id}>'s wager. Duel cancelled.")
+            await channel.send(
+                f"❌ <@{chal_id}> doesn't have enough $GOO. "
+                f"Need **{GOO_WAGER_1V1:,}**, have **{chal_bal:,}**. "
+                f"Deposit with `/pvp_deposit`. Duel cancelled."
+            )
             db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
             await _update_board(channel, "waiting", None, None, "No active challenge")
             return
 
         if not _lock_wager(db, opp_id, GOO_WAGER_1V1, duel_id):
             _refund_wager(db, chal_id, GOO_WAGER_1V1, duel_id, "opp failed")
-            await channel.send(f"❌ Couldn't lock <@{opp_id}>'s wager. Challenger refunded.")
+            await channel.send(
+                f"❌ <@{opp_id}> doesn't have enough $GOO. "
+                f"Need **{GOO_WAGER_1V1:,}**, have **{opp_bal:,}**. "
+                f"Deposit with `/pvp_deposit`. Challenger refunded."
+            )
             db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
             await _update_board(channel, "waiting", None, None, "No active challenge")
             return
