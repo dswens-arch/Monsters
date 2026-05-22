@@ -37,12 +37,12 @@ from typing import Optional
 # CONSTANTS
 # ─────────────────────────────────────────────
 
-MAX_ROUNDS        = 50
+MAX_ROUNDS        = 999         # effectively unlimited — battle runs until someone dies
 CRIT_CHANCE       = 0.12        # 12%
 CRIT_MULTIPLIER   = 2.0
 DAMAGE_JITTER     = 0.30        # ±30% random variance
-BASE_HP_FLAT      = 40          # lower base HP so battles finish faster
-BASE_HP_PER_DEF   = 2           # HP bonus per defense point
+BASE_HP_FLAT      = 40
+BASE_HP_PER_DEF   = 2
 
 STAT_BASE         = 10
 STAT_MAX          = 50
@@ -214,26 +214,14 @@ def resolve_battle(a: MonstrStats, b: MonstrStats) -> BattleResult:
                     total_rounds = round_num,
                 )
 
-    # Draw after MAX_ROUNDS
-    # Whoever has more HP remaining wins on points; true tie if equal
+    # After MAX_ROUNDS — pick winner by HP remaining (draw is essentially impossible now)
     hp_a = max(0, hp[a.asa_id])
     hp_b = max(0, hp[b.asa_id])
 
-    if hp_a > hp_b:
+    if hp_a >= hp_b:
         winner, loser = a, b
-    elif hp_b > hp_a:
-        winner, loser = b, a
     else:
-        # Pure draw — refund both (caller handles)
-        return BattleResult(
-            winner_asa   = "",
-            loser_asa    = "",
-            winner_owner = "",
-            loser_owner  = "",
-            rounds       = rounds,
-            is_draw      = True,
-            total_rounds = MAX_ROUNDS,
-        )
+        winner, loser = b, a
 
     return BattleResult(
         winner_asa   = winner.asa_id,
