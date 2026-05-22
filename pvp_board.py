@@ -50,13 +50,14 @@ COL_RED    = (255, 100, 100, 255)
 COL_BLUE   = (110, 180, 255, 255)
 
 # ── Font sizes ──────────────────────────────────
-# Discord renders this image at ~500px wide (31% of 1600px canvas)
-# So multiply desired visible px by ~3.2 to get canvas px
-FONT_NAME  = 110   # ~34px visible on Discord
-FONT_USER  = 80    # ~25px visible
-FONT_STAT  = 75    # ~23px visible
-FONT_WAIT  = 100   # ~31px visible
-FONT_SMALL = 60    # ~19px visible
+# Text zone is 732px wide on canvas, displays at ~229px on Discord
+# GP uses 36px bold on 800px canvas at ~469px Discord display
+# Our zone is ~half GP display width so we need ~2x GP canvas sizes
+FONT_NAME  = 66    # bold name — like GP FONT_BOLD scaled to zone
+FONT_USER  = 48    # username
+FONT_STAT  = 52    # stat numbers
+FONT_WAIT  = 60    # "WAITING..." 
+FONT_SMALL = 38    # small labels
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
