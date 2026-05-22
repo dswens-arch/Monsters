@@ -32,9 +32,13 @@ def _s(v): return int(v * SCALE)
 
 # ── Zones (output space) ────────────────────────
 P1_IMG  = (_s(783),  _s(852),  _s(1507), _s(1576))
-P1_TEXT = (_s(2036), _s(815),  _s(4230), _s(1614))
 P2_IMG  = (_s(3302), _s(2202), _s(4026), _s(2926))
-P2_TEXT = (_s(560),  _s(2172), _s(2754), _s(2970))
+
+# Text zones in raw output pixel coords (no scaling)
+# P1: right half, upper — next to P1 image
+P1_TEXT = (540,  200, 1580, 620)
+# P2: left half, lower — next to P2 image  
+P2_TEXT = (20,   630, 1060, 1050)
 
 P1_IMG_W = P1_IMG[2] - P1_IMG[0]
 P1_IMG_H = P1_IMG[3] - P1_IMG[1]
@@ -53,11 +57,11 @@ COL_BLUE   = (110, 180, 255, 255)
 # Text zone is 732px wide on canvas, displays at ~229px on Discord
 # GP uses 36px bold on 800px canvas at ~469px Discord display
 # Our zone is ~half GP display width so we need ~2x GP canvas sizes
-FONT_NAME  = 264
-FONT_USER  = 192
-FONT_STAT  = 208
-FONT_WAIT  = 240
-FONT_SMALL = 152
+FONT_NAME  = 90
+FONT_USER  = 65
+FONT_STAT  = 60
+FONT_WAIT  = 80
+FONT_SMALL = 48
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
