@@ -676,8 +676,10 @@ async def _on_monstr_picked(interaction: discord.Interaction,
 
         # Run battle via the cog — need a reference, use bot
         cog = interaction.client.cogs.get("PvPCog")
+        print(f"[PVP] Cog lookup: {cog}, available cogs: {list(interaction.client.cogs.keys())}")
         if cog:
-            await cog._run_board_battle(
+            print(f"[PVP] Starting battle: {challenger['user_id']} vs {user_id}")
+            asyncio.ensure_future(cog._run_board_battle(
                 channel    = interaction.channel,
                 db         = db,
                 chal_id    = challenger["user_id"],
@@ -688,7 +690,10 @@ async def _on_monstr_picked(interaction: discord.Interaction,
                 opp_asa    = str(asa_id),
                 opp_stats  = stats,
                 opp_uname  = username,
-            )
+            ))
+        else:
+            print("[PVP] ERROR: Could not find PvPCog!")
+            await interaction.channel.send("❌ Battle system error — cog not found.")
 
 
 # ─────────────────────────────────────────────
@@ -1258,7 +1263,9 @@ class PvPCog(commands.Cog):
             result_buf = await asyncio.to_thread(render_result, win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
+            import traceback
             print(f"[PVP] Winner board post failed: {e}")
+            print(traceback.format_exc())
             # Still announce winner in text
             if not result.is_draw:
                 winner_m = a if result.winner_asa == a.asa_id else b
