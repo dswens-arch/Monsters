@@ -1090,7 +1090,7 @@ class PvPCog(commands.Cog):
     )
     # ─────────────────────────────────────────
 
-    async def _run_and_post_battle(self, channel, db, duel_id: int,
+    async def _run_and_post_battle(self, channel, db: object, duel_id: int,
                                    a: MonstrStats, b: MonstrStats,
                                    chal_id: str, opp_id: str):
         """Resolve battle, handle payout/refund, post result embed."""
@@ -1194,7 +1194,7 @@ class PvPCog(commands.Cog):
     # BOARD BATTLE RUNNER (called from button flow)
     # ─────────────────────────────────────────
 
-    async def _run_board_battle(self, channel, db,
+    async def _run_board_battle(self, channel, db: object,
                                 chal_id: str, chal_asa: str,
                                 chal_stats: MonstrStats, chal_uname: str,
                                 opp_id: str, opp_asa: str,
