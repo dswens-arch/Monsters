@@ -253,7 +253,7 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
         img = None
         if str(asa_id) in MONSTR_ASSETS:
             cid = MONSTR_ASSETS[str(asa_id)][1]
-            img = f"https://ipfs.algonode.xyz/ipfs/{cid}"
+            img = f"https://cloudflare-ipfs.com/ipfs/{cid}"
         return MonstrStats(
             asa_id   = r["asa_id"],
             name     = r["monstr_name"],
