@@ -597,7 +597,7 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         # Run battle via the cog — need a reference, use bot
         cog: PvPCog = interaction.client.cogs.get("PvPCog")
         if cog:
-            await cog._run_board_battle(
+            await cog.__run_board_battle(
                 channel    = interaction.channel,
                 db         = db,
                 chal_id    = challenger["user_id"],
@@ -1090,7 +1090,7 @@ class PvPCog(commands.Cog):
     )
     # ─────────────────────────────────────────
 
-    async def _run_and_post_battle(self, channel, db: object, duel_id: int,
+    async def __run_and_post_battle(self, channel, db, duel_id: int,
                                    a: MonstrStats, b: MonstrStats,
                                    chal_id: str, opp_id: str):
         """Resolve battle, handle payout/refund, post result embed."""
@@ -1117,7 +1117,7 @@ class PvPCog(commands.Cog):
             _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
 
             # Fire on-chain payout async (non-blocking — balance already credited)
-            asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
+            asyncio.ensure_future(self.__send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
 
             db.table("pvp_duels").update({
                 "status":     "complete",
@@ -1194,7 +1194,7 @@ class PvPCog(commands.Cog):
     # BOARD BATTLE RUNNER (called from button flow)
     # ─────────────────────────────────────────
 
-    async def _run_board_battle(self, channel, db: object,
+    async def __run_board_battle(self, channel, db,
                                 chal_id: str, chal_asa: str,
                                 chal_stats: MonstrStats, chal_uname: str,
                                 opp_id: str, opp_asa: str,
@@ -1236,7 +1236,7 @@ class PvPCog(commands.Cog):
             return
 
         # Run battle
-        await self._run_and_post_battle(
+        await self.__run_and_post_battle(
             channel, db, duel_id,
             chal_stats, opp_stats, chal_id, opp_id
         )
@@ -1245,7 +1245,7 @@ class PvPCog(commands.Cog):
         await asyncio.sleep(4)
         await _update_board(channel, "waiting", None, None, "No active challenge")
 
-    async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
+    async def __send_winner_payout(self, user_id: str, amount: int, duel_id: int):
         """Fire on-chain GOO send to winner's linked wallet. Best-effort — balance already credited."""
         wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
         if not wallet:
