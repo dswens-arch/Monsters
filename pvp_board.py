@@ -20,8 +20,8 @@ P1_IMG = (_s(783),  _s(852),  _s(1507), _s(1576))
 P2_IMG = (_s(3302), _s(2202), _s(4026), _s(2926))
 
 # Text zones — raw output pixels, open dark space next to each image
-P1_TEXT = (540,  200, 1580, 580)   # right of P1 image, upper area
-P2_TEXT = (20,   640, 1060, 1020)  # left of P2 image, lower area
+P1_TEXT = (540,  310, 1580, 620)   # right of P1 image, below logo
+P2_TEXT = (20,   680, 1060, 1020)  # left of P2 image, lower area
 
 def _font(size):
     # Check common paths
@@ -81,9 +81,24 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = r.read()
+        # Try multiple gateways
+        urls = [
+            url,
+            url.replace("ipfs.algonode.xyz", "cloudflare-ipfs.com"),
+            url.replace("ipfs.algonode.xyz", "ipfs.io"),
+            url.replace("ipfs.algonode.xyz", "gateway.pinata.cloud"),
+        ]
+        data = None
+        for u in urls:
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = r.read()
+                break
+            except Exception:
+                continue
+        if not data:
+            raise Exception("all gateways failed")
         img = Image.open(io.BytesIO(data)).convert("RGBA")
         img.thumbnail(size, Image.LANCZOS)
         c = Image.new("RGBA", size, (0,0,0,0))
@@ -132,9 +147,9 @@ def render_board(state, p1=None, p2=None, status_text=""):
         ty += F_USER + 14
 
         # Stats on one line
-        _t(draw, x1,             ty, f"ATK {player.attack}",  fs, RED)
-        _t(draw, x1 + 340,       ty, f"DEF {player.defense}", fs, BLUE)
-        _t(draw, x1 + 680,       ty, f"SPD {player.speed}",   fs, GREEN)
+        _t(draw, x1,       ty, f"ATK {player.attack}",  fs, RED)
+        _t(draw, x1 + 220, ty, f"DEF {player.defense}", fs, BLUE)
+        _t(draw, x1 + 440, ty, f"SPD {player.speed}",   fs, GREEN)
 
     buf = io.BytesIO()
     board.convert("RGB").save(buf, format="PNG")
