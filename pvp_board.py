@@ -57,11 +57,11 @@ COL_BLUE   = (110, 180, 255, 255)
 # Text zone is 732px wide on canvas, displays at ~229px on Discord
 # GP uses 36px bold on 800px canvas at ~469px Discord display
 # Our zone is ~half GP display width so we need ~2x GP canvas sizes
-FONT_NAME  = 90
-FONT_USER  = 65
-FONT_STAT  = 60
-FONT_WAIT  = 80
-FONT_SMALL = 48
+FONT_NAME  = 64
+FONT_USER  = 52
+FONT_STAT  = 48
+FONT_WAIT  = 56
+FONT_SMALL = 40
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -127,59 +127,49 @@ def _make_placeholder(size: tuple) -> Image.Image:
     return img
 
 
+def _txt(draw, x, y, text, font, color):
+    """Draw text with drop shadow for readability over any background."""
+    draw.text((x+2, y+2), text, font=font, fill=(0,0,0,200), anchor="mm")
+    draw.text((x,   y),   text, font=font, fill=color,       anchor="mm")
+
+
 def _draw_text_zone(draw, zone, player: Optional[BoardPlayer], state: str, slot: int):
     x1, y1, x2, y2 = zone
-    w   = x2 - x1
-    h   = y2 - y1
-    cx  = x1 + w // 2
-    pad = int(h * 0.08)
-    ty  = y1 + pad
+    w  = x2 - x1
+    h  = y2 - y1
+    cx = x1 + w // 2
 
     fn  = _load_font(FONT_NAME)
     fu  = _load_font(FONT_USER)
     fst = _load_font(FONT_STAT)
     fw  = _load_font(FONT_WAIT)
-    fsl = _load_font(FONT_SMALL)
+
+    # Dark panel removed — template background is dark enough
+    pad = int(h * 0.12)
+    ty  = y1 + pad + FONT_NAME // 2
 
     if player is None:
-        draw.text((cx, y1 + h//2 - int(h*0.10)),
-                  "WAITING...", font=fw, fill=COL_WHITE, anchor="mm")
-        draw.text((cx, y1 + h//2 + int(h*0.14)),
-                  f"Slot {slot} open", font=fsl,
-                  fill=(200, 180, 255, 220), anchor="mm")
+        _txt(draw, cx, y1 + h//2 - int(h*0.08), "WAITING...",        fw, COL_WHITE)
+        _txt(draw, cx, y1 + h//2 + int(h*0.18), f"Slot {slot} open", fu, (180,160,220,255))
         return
 
-    # Winner crown
     if player.is_winner and state == "result":
-        draw.text((cx, ty), "👑 WINNER!", font=fn, fill=COL_YELLOW, anchor="mt")
+        _txt(draw, cx, ty, "👑 WINNER!", fn, COL_YELLOW)
         ty += int(FONT_NAME * 1.4)
 
-    # MONSTR name
-    draw.text((cx, ty), player.monstr_name.upper(),
-              font=fn, fill=COL_WHITE, anchor="mt")
-    ty += int(FONT_NAME * 1.3)
+    _txt(draw, cx, ty, player.monstr_name.upper(), fn, COL_WHITE)
+    ty += int(FONT_NAME * 1.4)
 
-    # @username
-    draw.text((cx, ty), f"@{player.username}",
-              font=fu, fill=COL_YELLOW, anchor="mt")
+    _txt(draw, cx, ty, f"@{player.username}", fu, COL_YELLOW)
     ty += int(FONT_USER * 1.6)
 
-    # Divider
-    draw.line([(x1 + int(w*0.05), ty), (x2 - int(w*0.05), ty)],
-              fill=(180, 160, 220, 130), width=2)
-    ty += int(h * 0.07)
-
-    # Stats: ATK / DEF / SPD on one line, evenly spaced
-    stats = [
-        ("ATK", player.attack,  COL_RED),
-        ("DEF", player.defense, COL_BLUE),
-        ("SPD", player.speed,   COL_GREEN),
-    ]
-    seg_w = w // len(stats)
+    stats = [("ATK", player.attack, COL_RED),
+             ("DEF", player.defense, COL_BLUE),
+             ("SPD", player.speed, COL_GREEN)]
+    seg_w = w // 3
     for i, (label, val, color) in enumerate(stats):
         sx = x1 + i * seg_w + seg_w // 2
-        draw.text((sx, ty), f"{label} {val}",
-                  font=fst, fill=color, anchor="mt")
+        _txt(draw, sx, ty, f"{label} {val}", fst, color)
 
 
 def render_board(state: str,
@@ -225,12 +215,6 @@ def render_board(state: str,
     draw = ImageDraw.Draw(board)
     _draw_text_zone(draw, P1_TEXT, p1, state, slot=1)
     _draw_text_zone(draw, P2_TEXT, p2, state, slot=2)
-
-    # ── Status text (bottom center) ──────────────
-    if status_text:
-        fst = _load_font(int(OUTPUT_W * 0.026))
-        draw.text((OUTPUT_W // 2, int(OUTPUT_H * 0.962)),
-                  status_text, font=fst, fill=COL_WHITE, anchor="mm")
 
     buf = io.BytesIO()
     board.convert("RGB").save(buf, format="PNG", optimize=True)
