@@ -37,10 +37,10 @@ def _font(size):
 # Font sizes — absolute pixels on the 1600px canvas
 # Text zone is ~1040px wide, displays at ~260px on Discord (4x scale)
 # So 60px canvas = 15px visible. Need ~24px visible = 96px canvas.
-F_NAME = 96
-F_USER = 72
-F_STAT = 68
-F_WAIT = 80
+F_NAME = 9600
+F_USER = 7200
+F_STAT = 6800
+F_WAIT = 8000
 
 WHITE  = (255, 255, 255, 255)
 YELLOW = (255, 215, 50,  255)
