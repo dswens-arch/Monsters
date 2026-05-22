@@ -694,20 +694,18 @@ class PvPCog(commands.Cog):
         embed = discord.Embed(
             title="💧 Deposit $GOO for PvP",
             description=(
-                f"Send $GOO to the bot wallet below. Your balance will be credited automatically "
-                f"within ~{DEPOSIT_POLL_SECONDS} seconds.\n\n"
-                f"**Bot wallet:**\n`{bot_addr}`\n\n"
-                f"Your current PvP balance: **{balance:,} $GOO**"
+                f"Send $GOO to the bot wallet address below.\n"
+                f"Your balance will be credited within ~{DEPOSIT_POLL_SECONDS} seconds.\n\n"
+                f"Your current PvP balance: **{balance:,} $GOO**\n\n"
+                f"Entry: **{GOO_WAGER_1V1:,} $GOO** per battle\n"
+                f"Upgrades: **100–2,000 $GOO** per level"
             ),
             color=0x1D9E75
         )
-        embed.add_field(
-            name="Entry costs",
-            value=f"1v1 wager: **{GOO_WAGER_1V1:,} $GOO**\nStat upgrade: **100–2,000 $GOO** per level",
-            inline=False
-        )
-        embed.set_footer(text="Use /pvp_balance to check your balance • /pvp_withdraw to pull funds back out")
+        embed.set_footer(text="/pvp_balance to check • /pvp_withdraw to pull funds out")
         await interaction.followup.send(embed=embed, ephemeral=True)
+        # Wallet address as separate message for easy copying
+        await interaction.followup.send(f"`{bot_addr}`", ephemeral=True)
 
     # ─────────────────────────────────────────
     # /pvp_balance
