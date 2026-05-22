@@ -169,16 +169,24 @@ def _get_bot_address() -> str:
 # ─────────────────────────────────────────────
 
 def _verify_ownership(asa_id: str, wallet_address: str) -> bool:
+    """Check wallet holds asa_id with amount > 0. Paginates through all assets."""
     import urllib.request, json as _json
     try:
         indexer_url = os.environ["INDEXER_URL"]
-        url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = _json.loads(r.read())
-        for asset in data.get("assets", []):
-            if str(asset.get("asset-id", "")) == str(asa_id) and asset.get("amount", 0) > 0:
-                return True
+        next_token  = None
+        while True:
+            url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?include-all=false&limit=1000"
+            if next_token:
+                url += f"&next={next_token}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = _json.loads(r.read())
+            for asset in data.get("assets", []):
+                if str(asset.get("asset-id", "")) == str(asa_id) and asset.get("amount", 0) > 0:
+                    return True
+            next_token = data.get("next-token")
+            if not next_token:
+                break
         return False
     except Exception as e:
         print(f"[PVP] ownership check failed asa={asa_id}: {e}")
@@ -919,7 +927,7 @@ class PvPCog(commands.Cog):
         # Verify ownership
         try:
             owns = await asyncio.wait_for(
-                asyncio.to_thread(_verify_ownership, asa_id, wallet), timeout=15
+                asyncio.to_thread(_verify_ownership, asa_id, wallet), timeout=60
             )
         except asyncio.TimeoutError:
             owns = False
