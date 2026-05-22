@@ -704,21 +704,25 @@ async def _update_board(channel, state: str,
                         p1=None, p2=None, status_text: str = ""):
     """
     Edit the persistent board message image in-place.
-    Falls back to posting a new message if board_msg_id is lost.
+    Shows Join Battle button only when waiting, not during active battle.
     """
-    buf = await asyncio.to_thread(render_board, state, p1, p2, status_text)
+    buf  = await asyncio.to_thread(render_board, state, p1, p2, status_text)
     file = discord.File(buf, filename="board.png")
+    view = JoinBattleView() if state in ("waiting",) else None
 
     try:
         if _board.board_msg_id:
             msg = await channel.fetch_message(_board.board_msg_id)
-            await msg.edit(attachments=[file], view=JoinBattleView())
+            if view:
+                await msg.edit(attachments=[file], view=view)
+            else:
+                await msg.edit(attachments=[file], view=discord.ui.View())
             return
     except Exception:
         pass
 
     # Post fresh if message not found
-    msg = await channel.send(file=file, view=JoinBattleView())
+    msg = await channel.send(file=file, view=view or discord.ui.View())
     _board.board_msg_id = msg.id
 
 
@@ -1192,16 +1196,41 @@ class PvPCog(commands.Cog):
             for r in result.rounds
         ]
 
-        # Post 5-8 rounds with 1.5s delay between each
-        num_show = min(len(result.rounds), _rnd.randint(5, 8))
-        to_show  = list(result.rounds[:num_show])
-        # Always include the finishing blow if not already included
-        if result.rounds and result.rounds[-1] not in to_show:
-            to_show[-1] = result.rounds[-1]
+        # Track HP for status bar
+        hp_a = a.hp
+        hp_b = b.hp
 
-        for r in to_show:
+        def _bar(current, maximum, length=8):
+            filled = max(0, round((current / maximum) * length))
+            return "█" * filled + "░" * (length - filled)
+
+        def _status():
+            pct_a = max(0, hp_a) / a.hp
+            pct_b = max(0, hp_b) / b.hp
+            bar_a = _bar(hp_a, a.hp)
+            bar_b = _bar(hp_b, b.hp)
+            return (
+                f"**{a.name}** [{bar_a}] {max(0,hp_a)}HP  ⚔️  "
+                f"**{b.name}** [{bar_b}] {max(0,hp_b)}HP"
+            )
+
+        # Post a pinned status message we keep editing
+        status_msg = await channel.send(_status())
+
+        # Post all rounds with delays, updating status bar after each
+        for r in result.rounds:
+            # Update HP tracking
+            if r.attacker_id == a.asa_id:
+                hp_b = r.defender_hp
+            else:
+                hp_a = r.defender_hp
+
             await channel.send(r.flavor)
+            await status_msg.edit(content=_status())
             await asyncio.sleep(1.5)
+            
+            if r.defender_hp <= 0:
+                break
 
         wager = GOO_WAGER_1V1
 
@@ -1336,6 +1365,26 @@ class PvPCog(commands.Cog):
         _board.reset()
         await _update_board(channel, "waiting", None, None, "No active challenge")
 
+
+    async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
+        """Fire on-chain GOO send to winner's linked wallet. Best-effort."""
+        wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
+        if not wallet:
+            print(f"[PVP] payout skipped — no wallet linked uid={user_id}")
+            return
+        opted = await asyncio.to_thread(has_opted_in, wallet)
+        if not opted:
+            print(f"[PVP] payout skipped — wallet not opted in uid={user_id}")
+            return
+        try:
+            tx_id = await asyncio.to_thread(
+                send_goo, wallet, amount, f"MONSTRS PvP win duel#{duel_id}"
+            )
+            db = _db()
+            _log_transaction(db, user_id, duel_id, "payout_onchain", amount, wallet, tx_id)
+            print(f"[PVP] payout sent uid={user_id} duel#{duel_id} tx={tx_id[:16]}")
+        except Exception as e:
+            print(f"[PVP] on-chain payout failed uid={user_id}: {e}")
 
     async def _notify_unmatched_deposit(self, amount: int):
         """Notify channel that a deposit arrived but couldn't be auto-matched."""
