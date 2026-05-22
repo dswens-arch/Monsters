@@ -570,9 +570,10 @@ async def _on_monstr_picked(interaction: discord.Interaction,
             f"✅ **{stats.name}** is in the arena! Waiting for an opponent...",
             ephemeral=True
         )
-        # Update board image to waiting state
+        # Update board image to waiting state with challenger's MONSTR
         channel = interaction.channel
-        await _update_board(channel, "waiting")
+        bp1 = _to_board_player(stats, username)
+        await _update_board(channel, "waiting", p1=bp1, status_text="Waiting for opponent...")
 
     else:
         # ── Second player — start battle ──
@@ -591,7 +592,7 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         _board.reset()
 
         # Run battle via the cog — need a reference, use bot
-        cog: PvPCog = interaction.client.cogs.get("PvPCog")
+        cog = interaction.client.cogs.get("PvPCog")
         if cog:
             await cog.__run_board_battle(
                 channel    = interaction.channel,
