@@ -1075,11 +1075,14 @@ class PvPCog(commands.Cog):
     # ─────────────────────────────────────────
 
     # ─────────────────────────────────────────
+    # BATTLE RUNNER — round by round with delays
+    # ─────────────────────────────────────────
 
-    async def __run_and_post_battle(self, channel, db, duel_id: int,
-                                   a: MonstrStats, b: MonstrStats,
-                                   chal_id: str, opp_id: str):
-        """Resolve battle, handle payout/refund, post result embed."""
+    async def __run_and_post_battle(self, channel, db: object, duel_id: int,
+                                    a: MonstrStats, b: MonstrStats,
+                                    chal_id: str, opp_id: str):
+        """Resolve full battle, post 5-8 rounds with delays, then winner board."""
+        import random as _rnd
         result: BattleResult = await asyncio.to_thread(resolve_battle, a, b)
 
         battle_log = [
@@ -1088,56 +1091,104 @@ class PvPCog(commands.Cog):
             for r in result.rounds
         ]
 
+        # Post 5-8 rounds with 1.5s delay between each
+        num_show = min(len(result.rounds), _rnd.randint(5, 8))
+        to_show  = list(result.rounds[:num_show])
+        # Always include the finishing blow if not already included
+        if result.rounds and result.rounds[-1] not in to_show:
+            to_show[-1] = result.rounds[-1]
+
+        for r in to_show:
+            await channel.send(r.flavor)
+            await asyncio.sleep(1.5)
+
         wager = GOO_WAGER_1V1
 
+        # Payout / refund
         if result.is_draw:
             _refund_wager(db, chal_id, wager, duel_id, "draw")
             _refund_wager(db, opp_id,  wager, duel_id, "draw")
-    # ─────────────────────────────────────────
-    # /pvp_setupboard — admin, posts persistent board
-    # ─────────────────────────────────────────
+            db.table("pvp_duels").update({
+                "status": "draw", "battle_log": battle_log,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", duel_id).execute()
+        else:
+            winner_id = result.winner_owner
+            _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
+            asyncio.ensure_future(self.__send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
+            db.table("pvp_duels").update({
+                "status": "complete", "winner_id": winner_id,
+                "winner_asa": result.winner_asa, "battle_log": battle_log,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", duel_id).execute()
 
-    @discord.app_commands.command(
-        name="pvp_setupboard",
-        description="(Admin) Post the persistent PvP battle board in this channel"
-    )
-    @discord.app_commands.default_permissions(administrator=True)
-    async def pvp_setupboard(self, interaction: discord.Interaction):
-        if await _wrong_channel(interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
+        # Post winner board
+        winner_m     = a if result.winner_asa == a.asa_id else b
+        guild        = channel.guild
+        winner_uname = await _get_display_name(guild, winner_m.owner_id)
 
-        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
-        file = discord.File(buf, filename="board.png")
-        msg  = await interaction.channel.send(file=file, view=JoinBattleView())
-        _board.board_msg_id = msg.id
-        _board.reset()
-
-        await interaction.followup.send(
-            f"✅ Battle board posted (msg ID: ). Pin it to keep it visible.",
-            ephemeral=True
+        win_info = WinnerInfo(
+            monstr_name  = winner_m.name if not result.is_draw else a.name,
+            username     = winner_uname  if not result.is_draw else "draw",
+            total_rounds = result.total_rounds,
+            wager_won    = GOO_WINNER_CUT_1V1 if not result.is_draw else 0,
+            image_url    = winner_m.image_url  if not result.is_draw else None,
+            is_draw      = result.is_draw,
         )
+        result_buf = await asyncio.to_thread(render_result, win_info)
+        await channel.send(file=discord.File(result_buf, filename="result.png"))
 
     # ─────────────────────────────────────────
     # BOARD BATTLE RUNNER (called from button flow)
     # ─────────────────────────────────────────
 
-    async def __run_board_battle(self, channel, db,
-                                chal_id: str, chal_asa: str,
-                                chal_stats: MonstrStats, chal_uname: str,
-                                opp_id: str, opp_asa: str,
-                                opp_stats: MonstrStats, opp_uname: str):
+    async def __run_board_battle(self, channel, db: object,
+                                 chal_id: str, chal_asa: str,
+                                 chal_stats: MonstrStats, chal_uname: str,
+                                 opp_id: str, opp_asa: str,
+                                 opp_stats: MonstrStats, opp_uname: str):
         """Full battle flow triggered from the Join Battle button."""
-
-        # Update board to active state
         bp1 = _to_board_player(chal_stats, chal_uname)
         bp2 = _to_board_player(opp_stats,  opp_uname)
         await _update_board(channel, "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
 
-        # Create duel record
-    # ─────────────────────────────────────────
-    # DEPOSIT POLLING LOOP
-    # ─────────────────────────────────────────
+        duel_result = db.table("pvp_duels").insert({
+            "challenger_id":  chal_id,
+            "opponent_id":    opp_id,
+            "challenger_asa": chal_asa,
+            "opponent_asa":   opp_asa,
+            "room":           "goo",
+            "wager_amount":   GOO_WAGER_1V1,
+            "status":         "active",
+            "expires_at":     (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        }).execute()
+        duel_id = duel_result.data[0]["id"]
+
+        await asyncio.sleep(1)
+
+        if not _lock_wager(db, chal_id, GOO_WAGER_1V1, duel_id):
+            await channel.send(f"❌ Couldn't lock <@{chal_id}>'s wager. Duel cancelled.")
+            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await _update_board(channel, "waiting", None, None, "No active challenge")
+            return
+
+        if not _lock_wager(db, opp_id, GOO_WAGER_1V1, duel_id):
+            _refund_wager(db, chal_id, GOO_WAGER_1V1, duel_id, "opp failed")
+            await channel.send(f"❌ Couldn't lock <@{opp_id}>'s wager. Challenger refunded.")
+            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await _update_board(channel, "waiting", None, None, "No active challenge")
+            return
+
+        await self.__run_and_post_battle(
+            channel, db, duel_id,
+            chal_stats, opp_stats, chal_id, opp_id
+        )
+
+        # Wait then reset board for next battle
+        await asyncio.sleep(8)
+        _board.reset()
+        await _update_board(channel, "waiting", None, None, "No active challenge")
+
 
     async def _notify_unmatched_deposit(self, amount: int):
         """Notify channel that a deposit arrived but couldn't be auto-matched."""
