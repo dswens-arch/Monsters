@@ -39,24 +39,13 @@ def _font(size):
                 return f
             except: pass
 
-    # Download font if not found
+    # Font bundled in repo as DejaVuSans-Bold.ttf
     font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DejaVuSans-Bold.ttf")
-    if not os.path.exists(font_path):
-        try:
-            import urllib.request
-            urllib.request.urlretrieve(
-                "https://github.com/python-pillow/Pillow/raw/main/Tests/fonts/DejaVuSans.ttf",
-                font_path
-            )
-            print(f"[PVP] Downloaded font to {font_path}")
-        except Exception as e:
-            print(f"[PVP] Font download failed: {e}")
-
     if os.path.exists(font_path):
         try: return ImageFont.truetype(font_path, size)
         except: pass
 
-    print(f"[PVP] WARNING: using default font — text will be tiny!")
+    print(f"[PVP] WARNING: font not found at {font_path}")
     return ImageFont.load_default()
 
 # Font sizes — absolute pixels on the 1600px canvas
