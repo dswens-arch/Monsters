@@ -1186,129 +1186,87 @@ class PvPCog(commands.Cog):
     async def _run_and_post_battle(self, channel, db: object, duel_id: int,
                                     a: MonstrStats, b: MonstrStats,
                                     chal_id: str, opp_id: str):
-        """Resolve full battle, post 5-8 rounds with delays, then winner board."""
-        import random as _rnd
         result: BattleResult = await asyncio.to_thread(resolve_battle, a, b)
-
         battle_log = [
             {"round": r.round_num, "attacker": r.attacker_id, "damage": r.damage,
              "crit": r.is_crit, "defender_hp": r.defender_hp, "flavor": r.flavor}
             for r in result.rounds
         ]
-
-        # Track HP for status bar
         hp_a = a.hp
         hp_b = b.hp
 
-        def _bar(current, maximum, length=8):
-            filled = max(0, round((current / maximum) * length))
-            return "█" * filled + "░" * (length - filled)
+        def _bar(cur, mx, n=10):
+            f = max(0, round((cur / mx) * n))
+            if f == 0:    return "💀" * n
+            elif f <= 2:  return "🟥" * f + "⬛" * (n-f)
+            elif f <= 5:  return "🟧" * f + "⬛" * (n-f)
+            else:         return "🟩" * f + "⬛" * (n-f)
 
         def _status():
-            pct_a = max(0, hp_a) / a.hp
-            pct_b = max(0, hp_b) / b.hp
-            bar_a = _bar(hp_a, a.hp)
-            bar_b = _bar(hp_b, b.hp)
-            return (
-                f"**{a.name}** [{bar_a}] {max(0,hp_a)}HP  ⚔️  "
-                f"**{b.name}** [{bar_b}] {max(0,hp_b)}HP"
-            )
+            return ("❤️ **" + a.name + "** " + _bar(hp_a, a.hp) + " `" + str(max(0,hp_a)) + " HP`\n"
+                    + "❤️ **" + b.name + "** " + _bar(hp_b, b.hp) + " `" + str(max(0,hp_b)) + " HP`")
 
-        # Post a pinned status message we keep editing
         status_msg = await channel.send(_status())
-
-        # Post all rounds with delays, updating status bar after each
-        # Single round-by-round message that edits itself
-        round_msg = await channel.send("⚔️ Battle starting...")
+        round_msg  = await channel.send("⚔️ Battle starting...")
 
         for r in result.rounds:
-            # Update HP tracking
-            if r.attacker_id == a.asa_id:
-                hp_b = r.defender_hp
-            else:
-                hp_a = r.defender_hp
-
-            # Edit single message with latest round flavor
+            if r.attacker_id == a.asa_id: hp_b = r.defender_hp
+            else: hp_a = r.defender_hp
             await round_msg.edit(content=r.flavor)
             await status_msg.edit(content=_status())
             await asyncio.sleep(1.5)
-
-            if r.defender_hp <= 0:
-                break
+            if r.defender_hp <= 0: break
 
         wager = GOO_WAGER_1V1
-
-        # Payout / refund
         if result.is_draw:
             _refund_wager(db, chal_id, wager, duel_id, "draw")
-            _refund_wager(db, opp_id,  wager, duel_id, "draw")
-            db.table("pvp_duels").update({
-                "status": "draw", "battle_log": battle_log,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", duel_id).execute()
+            _refund_wager(db, opp_id, wager, duel_id, "draw")
+            try:
+                db.table("pvp_duels").update({"status": "draw", "battle_log": battle_log,
+                    "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
+            except Exception as e: print(f"[PVP] DB draw failed: {e}")
         else:
             winner_id = result.winner_owner
             _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
             asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
             try:
-                db.table("pvp_duels").update({
-                    "status": "complete", "winner_id": winner_id,
+                db.table("pvp_duels").update({"status": "complete", "winner_id": winner_id,
                     "winner_asa": result.winner_asa, "battle_log": battle_log,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", duel_id).execute()
-                print(f"[PVP] Duel #{duel_id} marked complete, winner={winner_id}")
+                    "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
+                print(f"[PVP] Duel #{duel_id} complete winner={winner_id}")
             except Exception as e:
-                print(f"[PVP] DB update failed duel#{duel_id}: {e}")
-                # Try without battle_log in case that's the issue
+                print(f"[PVP] DB failed: {e}")
                 try:
-                    db.table("pvp_duels").update({
-                        "status": "complete", "winner_id": winner_id,
+                    db.table("pvp_duels").update({"status": "complete", "winner_id": winner_id,
                         "winner_asa": result.winner_asa,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", duel_id).execute()
-                    print(f"[PVP] Duel #{duel_id} marked complete (without log)")
-                except Exception as e2:
-                    print(f"[PVP] DB update retry failed: {e2}")
+                        "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
+                except Exception as e2: print(f"[PVP] DB retry failed: {e2}")
 
-        # Post winner board
         try:
             if result.is_draw:
-                win_info = WinnerInfo(
-                    monstr_name  = a.name,
-                    username     = "draw",
-                    total_rounds = result.total_rounds,
-                    wager_won    = 0,
-                    image_url    = None,
-                    is_draw      = True,
-                )
+                win_info = WinnerInfo(monstr_name=a.name, username="draw",
+                    total_rounds=result.total_rounds, wager_won=0, image_url=None, is_draw=True)
             else:
-                winner_m     = a if result.winner_asa == a.asa_id else b
-                guild        = channel.guild
-                winner_uname = await _get_display_name(guild, winner_m.owner_id)
-                win_info = WinnerInfo(
-                    monstr_name  = winner_m.name,
-                    username     = winner_uname,
-                    total_rounds = result.total_rounds,
-                    wager_won    = GOO_WINNER_CUT_1V1,
-                    image_url    = winner_m.image_url,
-                    is_draw      = False,
-                )
+                winner_m = a if result.winner_asa == a.asa_id else b
+                winner_uname = await _get_display_name(channel.guild, winner_m.owner_id)
+                win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
+                    total_rounds=result.total_rounds, wager_won=GOO_WINNER_CUT_1V1,
+                    image_url=winner_m.image_url, is_draw=False)
             result_buf = await asyncio.to_thread(render_result, win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
             import traceback
-            print(f"[PVP] Winner board post failed: {e}")
+            print(f"[PVP] Winner board failed: {e}")
             print(traceback.format_exc())
-            # Still announce winner in text
-            if not result.is_draw:
-                winner_m = a if result.winner_asa == a.asa_id else b
-                await channel.send(f"🏆 **{winner_m.name}** wins! +{GOO_WINNER_CUT_1V1:,} $GOO")
-            else:
-                await channel.send("⚔️ Draw — wagers refunded!")
 
-    # ─────────────────────────────────────────
-    # BOARD BATTLE RUNNER (called from button flow)
-    # ─────────────────────────────────────────
+        if result.is_draw:
+            await channel.send("Both MONSTRs fought to a standstill — DRAW! "
+                + f"<@{chal_id}> <@{opp_id}> wagers refunded. GG! 🤝")
+        else:
+            winner_m = a if result.winner_asa == a.asa_id else b
+            loser_m  = b if result.winner_asa == a.asa_id else a
+            await channel.send(f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
+                + f"**+{GOO_WINNER_CUT_1V1:,} $GOO** credited. GG <@{loser_m.owner_id}>! 💪")
 
     async def _run_board_battle(self, channel, db: object,
                                  chal_id: str, chal_asa: str,
