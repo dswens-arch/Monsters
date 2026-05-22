@@ -47,9 +47,9 @@ from pvp_board_result import WinnerInfo, render_result
 # CONFIG
 # ─────────────────────────────────────────────
 
-GOO_WAGER_1V1      = 500        # per player
-GOO_WINNER_CUT_1V1 = 800        # winner receives (out of 1000 pot)
-GOO_TREASURY_1V1   = 200        # stays in bot wallet as treasury
+GOO_WAGER_1V1      = 100        # per player
+GOO_WINNER_CUT_1V1 = 200        # winner receives (out of 1000 pot)
+GOO_TREASURY_1V1   = 0        # stays in bot wallet as treasury
 
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 30       # how often to check for new deposits
