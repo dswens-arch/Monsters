@@ -50,11 +50,13 @@ COL_RED    = (255, 100, 100, 255)
 COL_BLUE   = (110, 180, 255, 255)
 
 # ── Font sizes ──────────────────────────────────
-FONT_NAME  = int(OUTPUT_W * 0.052)
-FONT_USER  = int(OUTPUT_W * 0.038)
-FONT_STAT  = int(OUTPUT_W * 0.042)
-FONT_WAIT  = int(OUTPUT_W * 0.052)
-FONT_SMALL = int(OUTPUT_W * 0.030)
+# Discord renders this image at ~500px wide (31% of 1600px canvas)
+# So multiply desired visible px by ~3.2 to get canvas px
+FONT_NAME  = 110   # ~34px visible on Discord
+FONT_USER  = 80    # ~25px visible
+FONT_STAT  = 75    # ~23px visible
+FONT_WAIT  = 100   # ~31px visible
+FONT_SMALL = 60    # ~19px visible
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
