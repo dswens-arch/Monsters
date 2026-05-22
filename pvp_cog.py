@@ -202,11 +202,23 @@ def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = _json.loads(r.read())
 
+        all_assets = data.get("assets", [])
+        print(f"[PVP] wallet {wallet_address[:8]}... has {len(all_assets)} total assets")
+
         held = []
-        for asset in data.get("assets", []):
+        for asset in all_assets:
             asa = str(asset.get("asset-id", ""))
-            if asa in MONSTR_ASSETS and asset.get("amount", 0) > 0:
+            amt = asset.get("amount", 0)
+            if amt > 0 and asa in MONSTR_ASSETS:
                 held.append(asa)
+
+        print(f"[PVP] matched {len(held)} MONSTRs from MONSTR_ASSETS (size={len(MONSTR_ASSETS)})")
+        if all_assets and not held:
+            # Log first 5 ASA IDs to see if they look like MONSTRs
+            sample = [str(a.get("asset-id")) for a in all_assets[:5]]
+            print(f"[PVP] sample ASA IDs from wallet: {sample}")
+            print(f"[PVP] first MONSTR_ASSETS key sample: {list(MONSTR_ASSETS.keys())[:3]}")
+
         return held
     except Exception as e:
         print(f"[PVP] fetch_monstr_asa_ids failed {wallet_address[:8]}...: {e}")
@@ -882,13 +894,8 @@ class PvPCog(commands.Cog):
         """Complete registration after MONSTR is chosen."""
         await interaction.response.defer(ephemeral=True)
 
-        if str(asa_id) not in MONSTR_ASSETS:
-            await interaction.followup.send(
-                f"❌ `{asa_id}` isn't a recognised MONSTR ASA ID.", ephemeral=True
-            )
-            return
-
-        monstr_name = MONSTR_ASSETS[str(asa_id)][0]
+        # Look up name from registry, or use generic name if not found
+        monstr_name = MONSTR_ASSETS.get(str(asa_id), (f"MONSTR #{asa_id[-4:]}",))[0]
         db = _db()
 
         # Already registered?
