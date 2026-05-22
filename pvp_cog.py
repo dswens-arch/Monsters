@@ -1196,11 +1196,11 @@ class PvPCog(commands.Cog):
         hp_b = b.hp
 
         def _bar(cur, mx, n=10):
-            f = max(0, round((cur / mx) * n))
-            if f == 0:    return "💀" * n
-            elif f <= 2:  return "🟥" * f + "⬛" * (n-f)
-            elif f <= 5:  return "🟧" * f + "⬛" * (n-f)
-            else:         return "🟩" * f + "⬛" * (n-f)
+            if cur <= 0: return "💀" * n
+            f = max(1, round((cur / mx) * n))
+            if f <= 2:   return "🟥" * f + "⬛" * (n-f)
+            elif f <= 5: return "🟧" * f + "⬛" * (n-f)
+            else:        return "🟩" * f + "⬛" * (n-f)
 
         def _status():
             return ("❤️ **" + a.name + "** " + _bar(hp_a, a.hp) + " `" + str(max(0,hp_a)) + " HP`\n"
