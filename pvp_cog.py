@@ -189,36 +189,40 @@ def _verify_ownership(asa_id: str, wallet_address: str) -> bool:
 def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
     """
     Return list of MONSTR ASA IDs held by wallet_address (amount > 0).
-    Uses MONSTR_ASSETS registry as the source of truth for valid ASA IDs.
+    Paginates through all assets using next-token.
     """
     import urllib.request, json as _json
     try:
         indexer_url = os.environ["INDEXER_URL"]
-        url = (
-            f"{indexer_url}/v2/accounts/{wallet_address}/assets"
-            f"?include-all=false&limit=1000"
-        )
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = _json.loads(r.read())
+        held       = []
+        next_token = None
+        page       = 0
 
-        all_assets = data.get("assets", [])
-        print(f"[PVP] wallet {wallet_address[:8]}... has {len(all_assets)} total assets")
+        while True:
+            url = (
+                f"{indexer_url}/v2/accounts/{wallet_address}/assets"
+                f"?include-all=false&limit=1000"
+            )
+            if next_token:
+                url += f"&next={next_token}"
 
-        held = []
-        for asset in all_assets:
-            asa = str(asset.get("asset-id", ""))
-            amt = asset.get("amount", 0)
-            if amt > 0 and asa in MONSTR_ASSETS:
-                held.append(asa)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = _json.loads(r.read())
 
-        print(f"[PVP] matched {len(held)} MONSTRs from MONSTR_ASSETS (size={len(MONSTR_ASSETS)})")
-        if all_assets and not held:
-            # Log first 5 ASA IDs to see if they look like MONSTRs
-            sample = [str(a.get("asset-id")) for a in all_assets[:5]]
-            print(f"[PVP] sample ASA IDs from wallet: {sample}")
-            print(f"[PVP] first MONSTR_ASSETS key sample: {list(MONSTR_ASSETS.keys())[:3]}")
+            assets = data.get("assets", [])
+            page  += 1
 
+            for asset in assets:
+                asa = str(asset.get("asset-id", ""))
+                if asset.get("amount", 0) > 0 and asa in MONSTR_ASSETS:
+                    held.append(asa)
+
+            next_token = data.get("next-token")
+            if not next_token or not assets:
+                break
+
+        print(f"[PVP] {wallet_address[:8]}... scanned {page} page(s), found {len(held)} MONSTRs")
         return held
     except Exception as e:
         print(f"[PVP] fetch_monstr_asa_ids failed {wallet_address[:8]}...: {e}")
