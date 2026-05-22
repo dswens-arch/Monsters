@@ -342,10 +342,6 @@ def _build_battle_embed(result: BattleResult, a: MonstrStats, b: MonstrStats,
         if winner_m.image_url:
             embed.set_thumbnail(url=winner_m.image_url)
 
-    embed.set_footer(text="/pvp_duel to challenge • /pvp_balance to check your GOO")
-    return embed
-
-
 # ─────────────────────────────────────────────
 # WAGER LOCK / RELEASE HELPERS
 # ─────────────────────────────────────────────
@@ -1077,17 +1073,8 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
-    # /pvp_duel — direct challenge
     # ─────────────────────────────────────────
 
-    @discord.app_commands.command(
-        name="pvp_duel",
-        description="Challenge another player to a 1v1 GOO wager battle"
-    )
-    @discord.app_commands.describe(
-        opponent="The player you want to challenge",
-        asa_id="Your MONSTR's ASA ID"
-    )
     # ─────────────────────────────────────────
 
     async def __run_and_post_battle(self, channel, db, duel_id: int,
@@ -1107,64 +1094,6 @@ class PvPCog(commands.Cog):
         if result.is_draw:
             _refund_wager(db, chal_id, wager, duel_id, "draw")
             _refund_wager(db, opp_id,  wager, duel_id, "draw")
-            db.table("pvp_duels").update({
-                "status":     "draw",
-                "battle_log": battle_log,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", duel_id).execute()
-        else:
-            winner_id = result.winner_owner
-            _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
-
-            # Fire on-chain payout async (non-blocking — balance already credited)
-            asyncio.ensure_future(self.__send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
-
-            db.table("pvp_duels").update({
-                "status":     "complete",
-                "winner_id":  winner_id,
-                "winner_asa": result.winner_asa,
-                "battle_log": battle_log,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", duel_id).execute()
-
-        # Post result board
-        if result.is_draw:
-            winner_stats = a
-            winner_uname = "draw"
-        else:
-            winner_stats = a if result.winner_asa == a.asa_id else b
-            loser_stats  = b if result.winner_asa == a.asa_id else a
-            # Get display name from guild
-            guild = channel.guild
-            winner_uname = await _get_display_name(guild, winner_stats.owner_id)
-
-        if result.is_draw:
-            win_info = WinnerInfo(
-                monstr_name  = a.name,
-                username     = "draw",
-                total_rounds = result.total_rounds,
-                wager_won    = 0,
-                image_url    = None,
-                is_draw      = True,
-            )
-        else:
-            win_info = WinnerInfo(
-                monstr_name  = winner_stats.name,
-                username     = winner_uname,
-                total_rounds = result.total_rounds,
-                wager_won    = GOO_WINNER_CUT_1V1,
-                image_url    = winner_stats.image_url,
-                is_draw      = False,
-            )
-
-        result_buf = await asyncio.to_thread(render_result, win_info)
-        summary_lines = [r.flavor for r in result.rounds[-5:]]
-        summary = "\n".join(summary_lines) if summary_lines else ""
-        await channel.send(
-            content=summary or None,
-            file=discord.File(result_buf, filename="result.png")
-        )
-
     # ─────────────────────────────────────────
     # /pvp_setupboard — admin, posts persistent board
     # ─────────────────────────────────────────
@@ -1207,64 +1136,6 @@ class PvPCog(commands.Cog):
         await _update_board(channel, "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
 
         # Create duel record
-        duel_result = db.table("pvp_duels").insert({
-            "challenger_id":  chal_id,
-            "opponent_id":    opp_id,
-            "challenger_asa": chal_asa,
-            "opponent_asa":   opp_asa,
-            "room":           "goo",
-            "wager_amount":   GOO_WAGER_1V1,
-            "status":         "active",
-            "expires_at":     (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-        }).execute()
-        duel_id = duel_result.data[0]["id"]
-
-        await asyncio.sleep(2)
-
-        # Lock wagers
-        if not _lock_wager(db, chal_id, GOO_WAGER_1V1, duel_id):
-            await channel.send(f"❌ Couldn't lock <@{chal_id}>'s wager. Duel cancelled.")
-            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
-            await _update_board(channel, "waiting", None, None, "No active challenge")
-            return
-
-        if not _lock_wager(db, opp_id, GOO_WAGER_1V1, duel_id):
-            _refund_wager(db, chal_id, GOO_WAGER_1V1, duel_id, "opp failed")
-            await channel.send(f"❌ Couldn't lock <@{opp_id}>'s wager. Challenger refunded.")
-            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
-            await _update_board(channel, "waiting", None, None, "No active challenge")
-            return
-
-        # Run battle
-        await self.__run_and_post_battle(
-            channel, db, duel_id,
-            chal_stats, opp_stats, chal_id, opp_id
-        )
-
-        # Reset board to empty after brief pause
-        await asyncio.sleep(4)
-        await _update_board(channel, "waiting", None, None, "No active challenge")
-
-    async def __send_winner_payout(self, user_id: str, amount: int, duel_id: int):
-        """Fire on-chain GOO send to winner's linked wallet. Best-effort — balance already credited."""
-        wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
-        if not wallet:
-            print(f"[PVP] payout skipped — no wallet linked uid={user_id} duel#{duel_id}")
-            return
-        opted = await asyncio.to_thread(has_opted_in, wallet)
-        if not opted:
-            print(f"[PVP] payout skipped — wallet not opted in uid={user_id} duel#{duel_id}")
-            return
-        try:
-            tx_id = await asyncio.to_thread(
-                send_goo, wallet, amount, f"MONSTRS PvP win duel#{duel_id}"
-            )
-            db = _db()
-            _log_transaction(db, user_id, duel_id, "payout_onchain", amount, wallet, tx_id)
-            print(f"[PVP] payout sent uid={user_id} duel#{duel_id} tx={tx_id[:16]}")
-        except Exception as e:
-            print(f"[PVP] on-chain payout failed uid={user_id} duel#{duel_id}: {e}")
-
     # ─────────────────────────────────────────
     # DEPOSIT POLLING LOOP
     # ─────────────────────────────────────────
