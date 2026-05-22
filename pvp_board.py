@@ -50,11 +50,11 @@ COL_RED    = (255, 100, 100, 255)
 COL_BLUE   = (110, 180, 255, 255)
 
 # ── Font sizes ──────────────────────────────────
-FONT_NAME  = int(OUTPUT_W * 0.042)
-FONT_USER  = int(OUTPUT_W * 0.030)
-FONT_STAT  = int(OUTPUT_W * 0.034)
-FONT_WAIT  = int(OUTPUT_W * 0.044)
-FONT_SMALL = int(OUTPUT_W * 0.022)
+FONT_NAME  = int(OUTPUT_W * 0.052)
+FONT_USER  = int(OUTPUT_W * 0.038)
+FONT_STAT  = int(OUTPUT_W * 0.042)
+FONT_WAIT  = int(OUTPUT_W * 0.052)
+FONT_SMALL = int(OUTPUT_W * 0.030)
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -84,9 +84,22 @@ class BoardPlayer:
 
 def _fetch_nft_image(url: str, size: tuple) -> Optional[Image.Image]:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = r.read()
+        gateways = [
+            url,
+            url.replace("ipfs.algonode.xyz", "dweb.link"),
+            url.replace("ipfs.algonode.xyz", "ipfs.io"),
+        ]
+        data = None
+        for gw_url in gateways:
+            try:
+                req = urllib.request.Request(gw_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = r.read()
+                break
+            except Exception:
+                continue
+        if not data:
+            return None
         img = Image.open(io.BytesIO(data)).convert("RGBA")
         img.thumbnail(size, Image.LANCZOS)
         canvas = Image.new("RGBA", size, (0, 0, 0, 0))
