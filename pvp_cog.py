@@ -1625,7 +1625,6 @@ class PvPCog(commands.Cog):
             win_info = WinnerInfo(
                 monstr_name  = a.name,
                 username     = "draw",
-                attack=a.attack, defense=a.defense, speed=a.speed, hp=a.hp,
                 total_rounds = result.total_rounds,
                 wager_won    = 0,
                 image_url    = None,
@@ -1635,10 +1634,6 @@ class PvPCog(commands.Cog):
             win_info = WinnerInfo(
                 monstr_name  = winner_stats.name,
                 username     = winner_uname,
-                attack       = winner_stats.attack,
-                defense      = winner_stats.defense,
-                speed        = winner_stats.speed,
-                hp           = winner_stats.hp,
                 total_rounds = result.total_rounds,
                 wager_won    = GOO_WINNER_CUT_1V1,
                 image_url    = winner_stats.image_url,
