@@ -1036,65 +1036,106 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_upgrade",
-        description="Spend $GOO from your PvP balance to upgrade a MONSTR's stat"
+        description="Spend $GOO to upgrade one of your registered MONSTRs"
     )
-    @discord.app_commands.describe(
-        asa_id="The ASA ID of your MONSTR",
-        stat="Which stat to upgrade"
-    )
-    @discord.app_commands.choices(stat=[
-        discord.app_commands.Choice(name="attack",  value="attack"),
-        discord.app_commands.Choice(name="defense", value="defense"),
-        discord.app_commands.Choice(name="speed",   value="speed"),
-    ])
-    async def pvp_upgrade(self, interaction: discord.Interaction, asa_id: str, stat: str):
+    async def pvp_upgrade(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
         db      = _db()
-
-        row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
-        if not row.data:
-            await interaction.followup.send(
-                f"❌ **{asa_id}** isn't registered. Use `/pvp_register {asa_id}` first.",
-                ephemeral=True
-            )
-            return
-        if row.data[0]["owner_id"] != user_id:
-            await interaction.followup.send("❌ You don't own that MONSTR.", ephemeral=True)
-            return
-
-        r           = row.data[0]
-        current_val = r[stat]
-
-        if not can_upgrade(current_val):
-            await interaction.followup.send(
-                f"📈 **{stat.capitalize()}** is already maxed at {STAT_MAX}!", ephemeral=True
-            )
-            return
-
-        cost    = upgrade_cost(current_val)
         balance = _get_balance(db, user_id)
 
-        if balance < cost:
+        # Fetch their registered MONSTRs
+        rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name,attack,defense,speed") \
+                 .eq("owner_id", user_id).execute()
+        if not rows.data:
             await interaction.followup.send(
-                f"❌ Not enough $GOO. This upgrade costs **{cost:,} $GOO** "
-                f"but your PvP balance is **{balance:,} $GOO**.\n\n"
-                f"Deposit more with `/pvp_deposit`.",
-                ephemeral=True
+                "❌ You have no registered MONSTRs. Use `/pvp_register` first.", ephemeral=True
             )
             return
 
-        # Deduct balance
+        # Show MONSTR picker
+        async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
+            await self._show_stat_picker(pick_interaction, asa_id, user_id, db, balance)
+
+        monstr_rows = [{"asa_id": r["asa_id"], "monstr_name": r["monstr_name"]} for r in rows.data[:5]]
+        view = MonstrPickerView(monstr_rows, on_pick)
+        await interaction.followup.send(
+            f"**Choose a MONSTR to upgrade** (balance: **{balance:,} $GOO**):",
+            view=view, ephemeral=True
+        )
+
+    async def _show_stat_picker(self, interaction: discord.Interaction,
+                                 asa_id: str, user_id: str, db, balance: int):
+        """Show ATK / DEF / SPD upgrade buttons for chosen MONSTR."""
+        await interaction.response.defer(ephemeral=True)
+
+        row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
+        if not row.data or row.data[0]["owner_id"] != user_id:
+            await interaction.followup.send("❌ MONSTR not found or not yours.", ephemeral=True)
+            return
+
+        r = row.data[0]
+        stats = {
+            "attack":  r["attack"],
+            "defense": r["defense"],
+            "speed":   r["speed"],
+        }
+
+        view = discord.ui.View(timeout=60)
+
+        for stat, val in stats.items():
+            cost    = upgrade_cost(val)
+            capped  = not can_upgrade(val)
+            label   = f"{stat.upper()} {val}→{val+1}  ({cost:,} $GOO)" if not capped else f"{stat.upper()} {val} MAX"
+            enabled = not capped and balance >= cost
+            btn = discord.ui.Button(
+                label    = label,
+                style    = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
+                disabled = not enabled,
+                custom_id= f"upgrade_{asa_id}_{stat}",
+            )
+            async def make_cb(s=stat, v=val, c=cost):
+                async def cb(intr: discord.Interaction):
+                    await self._do_upgrade(intr, asa_id, s, v, c, user_id, db)
+                return cb
+            btn.callback = await make_cb()
+            view.add_item(btn)
+
+        atk_cost = upgrade_cost(r["attack"])
+        def_cost = upgrade_cost(r["defense"])
+        spd_cost = upgrade_cost(r["speed"])
+        await interaction.followup.send(
+            f"**{r['monstr_name']}** — choose a stat to upgrade\n"
+            f"Balance: **{balance:,} $GOO**\n"
+            f"ATK {r['attack']} | DEF {r['defense']} | SPD {r['speed']}",
+            view=view, ephemeral=True
+        )
+
+    async def _do_upgrade(self, interaction: discord.Interaction,
+                           asa_id: str, stat: str, current_val: int,
+                           cost: int, user_id: str, db):
+        """Execute the upgrade after stat button is tapped."""
+        await interaction.response.defer(ephemeral=True)
+
+        balance = _get_balance(db, user_id)
+        if balance < cost:
+            await interaction.followup.send(
+                f"❌ Not enough $GOO. Need **{cost:,}**, have **{balance:,}**.", ephemeral=True
+            )
+            return
+
+        row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
+        monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
+
         ok, new_bal = _deduct(db, user_id, cost,
-                              note=f"upgrade {r['monstr_name']} {stat} {current_val}→{current_val+1}")
+                              note=f"upgrade {monstr_name} {stat} {current_val}→{current_val+1}")
         if not ok:
             await interaction.followup.send("❌ Balance changed — please try again.", ephemeral=True)
             return
 
-        # Apply upgrade
         new_val = current_val + 1
         db.table("monstr_pvp_stats").update({
             stat:         new_val,
@@ -1102,23 +1143,24 @@ class PvPCog(commands.Cog):
         }).eq("asa_id", str(asa_id)).execute()
 
         _log_transaction(db, user_id, None, "upgrade_spend", cost,
-                         note=f"{r['monstr_name']} {stat} {current_val}→{new_val}")
+                         note=f"{monstr_name} {stat} {current_val}→{new_val}")
 
         stats = _load_stats(asa_id, user_id)
-
         embed = discord.Embed(
-            title=f"📈 {r['monstr_name']} upgraded!",
+            title=f"📈 {monstr_name} upgraded!",
             description=(
-                f"**{stat.capitalize()}** {current_val} → **{new_val}**  •  "
+                f"**{stat.capitalize()}** {current_val} → **{new_val}**\n"
                 f"Cost: {cost:,} $GOO  •  Balance: {new_bal:,} $GOO"
             ),
             color=0x1D9E75
         )
-        for name, val in format_stats_embed_fields(stats):
-            embed.add_field(name=name, value=val, inline=False)
+        if stats:
+            for name, val in format_stats_embed_fields(stats):
+                embed.add_field(name=name, value=val, inline=False)
+        if stats and stats.image_url:
+            embed.set_thumbnail(url=stats.image_url)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # ─────────────────────────────────────────
     # /pvp_stats
     # ─────────────────────────────────────────
 
