@@ -1330,24 +1330,10 @@ class PvPCog(commands.Cog):
 
 
     async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
-        """Fire on-chain GOO send to winner's linked wallet. Best-effort."""
-        wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
-        if not wallet:
-            print(f"[PVP] payout skipped — no wallet linked uid={user_id}")
-            return
-        opted = await asyncio.to_thread(has_opted_in, wallet)
-        if not opted:
-            print(f"[PVP] payout skipped — wallet not opted in uid={user_id}")
-            return
-        try:
-            tx_id = await asyncio.to_thread(
-                send_goo, wallet, amount, f"MONSTRS PvP win duel#{duel_id}"
-            )
-            db = _db()
-            _log_transaction(db, user_id, duel_id, "payout_onchain", amount, wallet, tx_id)
-            print(f"[PVP] payout sent uid={user_id} duel#{duel_id} tx={tx_id[:16]}")
-        except Exception as e:
-            print(f"[PVP] on-chain payout failed uid={user_id}: {e}")
+        """Winner payout is handled custodially in Supabase via _credit_win.
+        On-chain withdrawal is handled separately via /pvp_withdraw.
+        """
+        print(f"[PVP] payout credited in Supabase uid={user_id} amount={amount} duel#{duel_id}")
 
     async def _notify_unmatched_deposit(self, amount: int):
         """Notify channel that a deposit arrived but couldn't be auto-matched."""
