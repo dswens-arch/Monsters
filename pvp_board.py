@@ -16,8 +16,8 @@ SCALE = OUTPUT_W / 4800
 def _s(v): return int(v * SCALE)
 
 # Image zones (from guide)
-P1_IMG = (_s(783),  _s(852),  _s(1507), _s(1576))
-P2_IMG = (_s(3302), _s(2202), _s(4026), _s(2926))
+P1_IMG = (_s(586),  _s(830),  _s(1665), _s(1910))
+P2_IMG = (_s(3142), _s(1818), _s(4250), _s(2927))
 
 # Text zones — exact from guide (yellow boxes)
 P1_TEXT = (678, 271, 1410, 538)   # top-right yellow zone
