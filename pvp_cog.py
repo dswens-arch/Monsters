@@ -1570,6 +1570,69 @@ class PvPCog(commands.Cog):
         self._last_bot_goo = await asyncio.to_thread(_get_bot_goo_balance)
         print(f"[PVP] deposit poller started — bot wallet GOO balance: {self._last_bot_goo:,}")
 
+
+    @tasks.loop(seconds=30)
+    async def poll_algo_deposits(self):
+        """Watch for incoming ALGO to bot wallet and credit custodial balances."""
+        import urllib.request, json as _json
+        try:
+            current = await asyncio.to_thread(_get_bot_algo_balance)
+            diff    = current - self._last_bot_algo
+            if diff <= 100_000:
+                self._last_bot_algo = current
+                return
+            db       = _db()
+            bot_addr = await asyncio.to_thread(_get_bot_address)
+            indexer_url = os.environ["INDEXER_URL"]
+            url = (
+                f"{indexer_url}/v2/transactions"
+                f"?address={bot_addr}&address-role=receiver&tx-type=pay&limit=20"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = _json.loads(r.read())
+            seen_rows = db.table("pvp_seen_deposits").select("tx_id").execute()
+            seen_ids  = {r["tx_id"] for r in seen_rows.data} if seen_rows.data else set()
+            for txn in data.get("transactions", []):
+                tx_id  = txn.get("id", "")
+                sender = txn.get("sender", "")
+                amount = txn.get("payment-transaction", {}).get("amount", 0)
+                if not tx_id or tx_id in seen_ids or amount < 100_000:
+                    continue
+                wallet_row = db.table("linked_wallets").select("user_id").eq("wallet_address", sender).execute()
+                db.table("pvp_seen_deposits").insert({"tx_id": tx_id, "note": f"algo amt={amount}"}).execute()
+                if not wallet_row.data:
+                    continue
+                user_id = wallet_row.data[0]["user_id"]
+                new_bal = _credit_algo(db, user_id, amount, f"algo deposit tx={tx_id[:16]}")
+                print(f"[PVP] ALGO deposit: uid={user_id} +{amount/1_000_000:g} ALGO bal={new_bal/1_000_000:g}")
+                asyncio.ensure_future(self._notify_algo_deposit(user_id, amount, new_bal))
+            self._last_bot_algo = current
+        except Exception as e:
+            if "403" not in str(e):
+                print(f"[PVP] poll_algo_deposits error: {e}")
+
+    @poll_algo_deposits.before_loop
+    async def before_algo_poll(self):
+        await self.bot.wait_until_ready()
+        self._last_bot_algo = await asyncio.to_thread(_get_bot_algo_balance)
+        print(f"[PVP] ALGO poller started — bot wallet: {self._last_bot_algo/1_000_000:g} ALGO")
+
+    async def _notify_algo_deposit(self, user_id: str, amount: int, new_bal: int):
+        ch_id = _pvp_channel_id()
+        if not ch_id: return
+        try:
+            channel = self.bot.get_channel(ch_id)
+            if channel:
+                await channel.send(
+                    f"ALGO deposited for <@{user_id}>: "
+                    f"**+{amount/1_000_000:g} ALGO** "
+                    f"Warden balance: **{new_bal/1_000_000:g} ALGO**",
+                    delete_after=30
+                )
+        except Exception as e:
+            print(f"[PVP] algo deposit notify failed: {e}")
+
     async def _process_deposits(self):
         """
         Poll bot wallet GOO balance via algod. Credit the difference to
