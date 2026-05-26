@@ -47,9 +47,9 @@ from pvp_board_result import WinnerInfo, render_result
 # CONFIG
 # ─────────────────────────────────────────────
 
-GOO_WAGER_1V1      = 100        # per player
-GOO_WINNER_CUT_1V1 = 200        # winner receives (out of 1000 pot)
-GOO_TREASURY_1V1   = 0        # stays in bot wallet as treasury
+GOO_WAGER_1V1      = 500        # per player
+GOO_WINNER_CUT_1V1 = 900        # winner receives (out of 1000 pot)
+GOO_TREASURY_1V1   = 100        # stays in bot wallet as treasury
 
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 30       # how often to check for new deposits
@@ -1087,79 +1087,62 @@ class PvPCog(commands.Cog):
         view = discord.ui.View(timeout=60)
 
         for stat, val in stats.items():
-            cost    = upgrade_cost(val)
-            capped  = not can_upgrade(val)
-            label   = f"{stat.upper()} {val}→{val+1}  ({cost:,} $GOO)" if not capped else f"{stat.upper()} {val} MAX"
-            enabled = not capped and balance >= cost
+            capped      = not can_upgrade(val)
+            algo_cost   = upgrade_cost_algo(val)
+            cost_label  = upgrade_cost_algo_display(val)
+            label       = f"{stat.upper()} {val}→{val+1}  ({cost_label})" if not capped else f"{stat.upper()} {val} MAX"
+            enabled     = not capped  # ALGO paid on-chain, always show enabled if not maxed
             btn = discord.ui.Button(
                 label    = label,
                 style    = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
                 disabled = not enabled,
                 custom_id= f"upgrade_{asa_id}_{stat}",
             )
-            async def make_cb(s=stat, v=val, c=cost):
+            async def make_cb(s=stat, v=val, ac=algo_cost):
                 async def cb(intr: discord.Interaction):
-                    await self._do_upgrade(intr, asa_id, s, v, c, user_id, db)
+                    await self._do_upgrade(intr, asa_id, s, v, ac, user_id, db)
                 return cb
             btn.callback = await make_cb()
             view.add_item(btn)
 
-        atk_cost = upgrade_cost(r["attack"])
-        def_cost = upgrade_cost(r["defense"])
-        spd_cost = upgrade_cost(r["speed"])
         await interaction.followup.send(
-            f"**{r['monstr_name']}** — choose a stat to upgrade\n"
-            f"Balance: **{balance:,} $GOO**\n"
+            f"**{r['monstr_name']}** — choose a stat to upgrade (costs paid in ALGO)\n"
             f"ATK {r['attack']} | DEF {r['defense']} | SPD {r['speed']}",
             view=view, ephemeral=True
         )
 
     async def _do_upgrade(self, interaction: discord.Interaction,
                            asa_id: str, stat: str, current_val: int,
-                           cost: int, user_id: str, db):
-        """Execute the upgrade after stat button is tapped."""
+                           algo_cost_micro: int, user_id: str, db):
+        """Execute the upgrade — player pays ALGO on-chain to bot wallet, then stat upgrades."""
         await interaction.response.defer(ephemeral=True)
-
-        balance = _get_balance(db, user_id)
-        if balance < cost:
-            await interaction.followup.send(
-                f"❌ Not enough $GOO. Need **{cost:,}**, have **{balance:,}**.", ephemeral=True
-            )
-            return
 
         row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
         monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
+        algo_display = upgrade_cost_algo_display(current_val)
+        bot_addr = await asyncio.to_thread(_get_bot_address)
 
-        ok, new_bal = _deduct(db, user_id, cost,
-                              note=f"upgrade {monstr_name} {stat} {current_val}→{current_val+1}")
-        if not ok:
-            await interaction.followup.send("❌ Balance changed — please try again.", ephemeral=True)
-            return
-
+        # Show payment instructions — ALGO payment is manual for now
+        # Future: watch for incoming ALGO tx and auto-apply
         new_val = current_val + 1
-        db.table("monstr_pvp_stats").update({
-            stat:         new_val,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("asa_id", str(asa_id)).execute()
-
-        _log_transaction(db, user_id, None, "upgrade_spend", cost,
-                         note=f"{monstr_name} {stat} {current_val}→{new_val}")
-
-        stats = _load_stats(asa_id, user_id)
         embed = discord.Embed(
-            title=f"📈 {monstr_name} upgraded!",
+            title=f"📈 Upgrade {monstr_name} — {stat.upper()}",
             description=(
-                f"**{stat.capitalize()}** {current_val} → **{new_val}**\n"
-                f"Cost: {cost:,} $GOO  •  Balance: {new_bal:,} $GOO"
+                f"**{stat.capitalize()}** {current_val} \u2192 **{new_val}**\n\n"
+                f"Cost: **{algo_display}**\n\n"
+                f"Send **{algo_display}** to the bot wallet, then DM an admin with your TxID:\n"
+                f"`{bot_addr}`"
             ),
-            color=0x1D9E75
+            color=0xF4B942
         )
-        if stats:
-            for name, val in format_stats_embed_fields(stats):
-                embed.add_field(name=name, value=val, inline=False)
-        if stats and stats.image_url:
-            embed.set_thumbnail(url=stats.image_url)
+        embed.set_footer(text="Auto-upgrade detection coming soon — manual confirm for now")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # Log the pending upgrade request
+        _log_transaction(db, user_id, None, "upgrade_pending",
+                         algo_cost_micro,
+                         note=f"{monstr_name} {stat} {current_val}→{new_val} pending ALGO payment")
+        print(f"[PVP] Upgrade pending: uid={user_id} asa={asa_id} {stat} {current_val}→{new_val} cost={algo_display}")
 
     # /pvp_stats
     # ─────────────────────────────────────────
@@ -1245,8 +1228,10 @@ class PvPCog(commands.Cog):
             else:        return "🟩" * f + "⬛" * (n-f)
 
         def _status():
-            return ("❤️ **" + a.name + "** " + _bar(hp_a, a.hp) + " `" + str(max(0,hp_a)) + " HP`\n"
-                    + "❤️ **" + b.name + "** " + _bar(hp_b, b.hp) + " `" + str(max(0,hp_b)) + " HP`")
+            return ("❤️ **" + a.name + "** `" + str(max(0,hp_a)) + " HP`\n"
+                    + _bar(hp_a, a.hp) + "\n"
+                    + "❤️ **" + b.name + "** `" + str(max(0,hp_b)) + " HP`\n"
+                    + _bar(hp_b, b.hp))
 
         status_msg = await channel.send(_status())
         round_msg  = await channel.send("⚔️ Battle starting...")
@@ -1270,6 +1255,10 @@ class PvPCog(commands.Cog):
         else:
             winner_id = result.winner_owner
             _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
+            # Treasury cut — credit to a designated admin wallet or just log it
+            if GOO_TREASURY_1V1 > 0:
+                _log_transaction(db, "treasury", duel_id, "treasury_cut",
+                                 GOO_TREASURY_1V1, note=f"10% cut duel#{duel_id}")
             asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
             try:
                 db.table("pvp_duels").update({"status": "complete", "winner_id": winner_id,
