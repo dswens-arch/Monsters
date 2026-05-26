@@ -1358,6 +1358,51 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
         print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val}")
 
+    # /pvp_info
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_info",
+        description="Everything you need to know about MONSTRS Battle"
+    )
+    async def pvp_info(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+
+        embed = discord.Embed(title="MONSTRS Battle - How to Play", color=0x1D9E75)
+
+        embed.add_field(name="Getting Started", inline=False, value=(
+            "`/link` - Link your Algorand wallet\n"
+            "`/pvp_register` - Register a MONSTR\n"
+            "`/pvp_roster` - View your registered MONSTRs\n"
+            "`/pvp_stats [asa_id]` - View a MONSTR stat card"
+        ))
+        embed.add_field(name="GOO Room (" + str(GOO_WAGER_1V1) + " $GOO entry)", inline=False, value=(
+            "`/pvp_deposit` - Deposit $GOO\n"
+            "`/pvp_balance` - Check $GOO balance\n"
+            "`/pvp_withdraw` - Withdraw $GOO\n"
+            "Winner gets " + str(GOO_WINNER_CUT_1V1) + " | Treasury: " + str(GOO_TREASURY_1V1)
+        ))
+        embed.add_field(name="ALGO Room (5 ALGO entry)", inline=False, value=(
+            "`/pvp_deposit_algo` - Top up Warden ALGO wallet\n"
+            "`/pvp_withdraw_algo` - Withdraw ALGO\n"
+            "Winner gets 9 ALGO | Treasury: 1 ALGO"
+        ))
+        embed.add_field(name="Upgrades", inline=False, value=(
+            "`/pvp_upgrade` - Spend ALGO to level ATK/DEF/SPD\n"
+            "Stats 10 to 50 | 0.1-2 ALGO per step | ~80 ALGO fully maxed\n"
+            "SPD diff >= 20 = double attack each round"
+        ))
+        embed.add_field(name="Battle Rules", inline=False, value=(
+            "Tap Join Battle to enter\n"
+            "2 players join = battle starts automatically\n"
+            "Same MONSTR cannot be in two rooms at once\n"
+            "30-min cooldown after every battle\n"
+            "Higher SPD goes first | Crits = 2x damage"
+        ))
+        embed.set_footer(text="Only the Weird Survive")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     # /pvp_roster
     # ─────────────────────────────────────────
 
