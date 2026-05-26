@@ -855,37 +855,32 @@ async def _update_board(channel, state: str, room: str = "goo",
 
 
 def _get_bot_algo_balance() -> int:
-    """Return the bot wallet ALGO balance in microALGO via algod."""
+    """Return the bot wallet ALGO balance in microALGO via indexer."""
     import urllib.request, json as _json
     try:
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        bot_addr  = _get_bot_address()
-        url = f"{algod_url}/v2/accounts/{bot_addr}"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req, timeout=5) as r:
+        indexer_url = os.environ["INDEXER_URL"]
+        bot_addr    = _get_bot_address()
+        url = f"{indexer_url}/v2/accounts/{bot_addr}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
             data = _json.loads(r.read())
         return data.get("account", {}).get("amount", 0)
     except Exception as e:
-        print(f"[PVP] bot ALGO balance check failed: {e}")
+        if "404" not in str(e):
+            print(f"[PVP] bot ALGO balance check failed: {e}")
         return 0
 
 
 def _get_bot_goo_balance() -> int:
-    """Return the bot wallet's current $GOO balance via algod."""
+    """Return the bot wallet GOO balance via indexer."""
     import urllib.request, json as _json
     try:
-        asset_id  = int(os.environ["GOO_ASSET_ID"])
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        bot_addr  = _get_bot_address()
-        url = f"{algod_url}/v2/accounts/{bot_addr}/assets/{asset_id}"
-        req = urllib.request.Request(url, headers={
-            "User-Agent":       "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req, timeout=5) as r:
+        asset_id    = int(os.environ["GOO_ASSET_ID"])
+        indexer_url = os.environ["INDEXER_URL"]
+        bot_addr    = _get_bot_address()
+        url = f"{indexer_url}/v2/accounts/{bot_addr}/assets/{asset_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
             data = _json.loads(r.read())
         return data.get("asset-holding", {}).get("amount", 0)
     except Exception as e:
