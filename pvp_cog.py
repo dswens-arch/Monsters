@@ -51,6 +51,10 @@ GOO_WAGER_1V1      = 500        # per player
 GOO_WINNER_CUT_1V1 = 900        # winner receives (out of 1000 pot)
 GOO_TREASURY_1V1   = 100        # stays in bot wallet as treasury
 
+ALGO_WAGER_1V1     = 5_000_000  # 5 ALGO in microALGO
+ALGO_WINNER_CUT    = 9_000_000  # 9 ALGO to winner
+ALGO_TREASURY      = 1_000_000  # 1 ALGO treasury
+
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 30       # how often to check for new deposits
 
@@ -431,16 +435,29 @@ def _pvp_channel_id() -> Optional[int]:
     val = os.environ.get("DISCORD_PVP_CHANNEL_ID", "")
     return int(val) if val else None
 
+def _algo_channel_id() -> Optional[int]:
+    val = os.environ.get("DISCORD_ALGO_CHANNEL_ID", "")
+    return int(val) if val else None
+
+def _channel_room(channel_id: int) -> Optional[str]:
+    """Return 'goo' or 'algo' based on channel."""
+    if channel_id == _pvp_channel_id(): return "goo"
+    if channel_id == _algo_channel_id(): return "algo"
+    return None
+
+
 
 async def _wrong_channel(interaction: discord.Interaction) -> bool:
-    ch_id = _pvp_channel_id()
-    if ch_id and interaction.channel_id != ch_id:
+    room = _channel_room(interaction.channel_id)
+    if room is None:
+        goo_id  = _pvp_channel_id()
+        algo_id = _algo_channel_id()
+        channels = " or ".join([f"<#{c}>" for c in [goo_id, algo_id] if c])
         await interaction.response.send_message(
-            f"⚔️ PvP commands only work in <#{ch_id}>.", ephemeral=True
+            f"PvP commands only work in {channels}.", ephemeral=True
         )
         return True
     return False
-
 
 # ─────────────────────────────────────────────
 # BATTLE RESULT EMBED
@@ -528,7 +545,11 @@ class BoardState:
     def is_empty(self) -> bool:
         return self.challenger is None
 
-_board = BoardState()
+_board      = BoardState()  # GOO room
+_board_algo = BoardState()  # ALGO room
+
+def _get_board(room: str) -> BoardState:
+    return _board_algo if room == "algo" else _board
 
 
 # ─────────────────────────────────────────────
@@ -652,127 +673,139 @@ class JoinBattleView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 async def _handle_join(interaction: discord.Interaction):
-    """
-    Ephemeral flow triggered when someone taps Join Battle.
-    1. Check they have a linked wallet and GOO balance
-    2. Show their registered MONSTRs as buttons (+ manual entry)
-    3. On MONSTR pick → if board empty become challenger, else trigger battle
-    """
+    """Ephemeral flow triggered when someone taps Join Battle."""
     await interaction.response.defer(ephemeral=True)
     user_id = str(interaction.user.id)
     db      = _db()
+    room    = _channel_room(interaction.channel_id) or "goo"
+    board   = _get_board(room)
 
     # Must have a linked wallet
     wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
     if not wallet:
         await interaction.followup.send(
-            "❌ You need to link your wallet first. Use .", ephemeral=True
-        )
+            "Link your wallet first with `/link`.", ephemeral=True)
         return
 
-    # Must have enough GOO balance
-    balance = _get_balance(db, user_id)
-    if balance < GOO_WAGER_1V1:
-        bot_addr = await asyncio.to_thread(_get_bot_address)
-        await interaction.followup.send(
-            f"❌ You need **{GOO_WAGER_1V1:,} $GOO** to join. You have {balance:,}. Deposit with /pvp_deposit.",
-            ephemeral=True
-        )
-        return
+    # Check balance for the right room
+    if room == "algo":
+        bal = _get_algo_balance(db, user_id)
+        if bal < ALGO_WAGER_1V1:
+            await interaction.followup.send(
+                f"Need **{ALGO_WAGER_1V1/1_000_000:g} ALGO** to join. "
+                f"You have **{bal/1_000_000:g} ALGO**. Use `/pvp_deposit_algo`.",
+                ephemeral=True)
+            return
+    else:
+        bal = _get_balance(db, user_id)
+        if bal < GOO_WAGER_1V1:
+            await interaction.followup.send(
+                f"Need **{GOO_WAGER_1V1:,} $GOO** to join. "
+                f"You have **{bal:,}**. Use `/pvp_deposit`.",
+                ephemeral=True)
+            return
 
     # Can't fight yourself
-    if not _board.is_empty and _board.challenger["user_id"] == user_id:
+    if not board.is_empty and board.challenger["user_id"] == user_id:
         await interaction.followup.send(
-            "You're already waiting for an opponent! Hang tight.", ephemeral=True
-        )
+            "You're already waiting for an opponent!", ephemeral=True)
         return
 
     # Fetch their registered MONSTRs
-    rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name")              .eq("owner_id", user_id).limit(5).execute()
-
+    rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name") \
+             .eq("owner_id", user_id).execute()
     if not rows.data:
         await interaction.followup.send(
-            "❌ You haven't registered any MONSTRs yet. Use  to get started.",
-            ephemeral=True
-        )
+            "No registered MONSTRs. Use `/pvp_register` first.", ephemeral=True)
         return
 
     async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
-        await _on_monstr_picked(pick_interaction, asa_id, user_id, db)
+        await _on_monstr_picked(pick_interaction, asa_id, user_id, db, room)
 
+    currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
     view = MonstrPickerView(rows.data, on_pick)
     await interaction.followup.send(
-        f"**Choose your MONSTR** ({balance:,} $GOO available):",
-        view   = view,
-        ephemeral = True,
-    )
+        f"**Choose your MONSTR** ({currency} available):",
+        view=view, ephemeral=True)
 
 
 async def _on_monstr_picked(interaction: discord.Interaction,
-                             asa_id: str, user_id: str, db):
-    """Called after a player picks their MONSTR. Either queues them or starts a battle."""
+                             asa_id: str, user_id: str, db, room: str = "goo"):
+    """Called after a player picks their MONSTR."""
     await interaction.response.defer(ephemeral=True)
+    board = _get_board(room)
 
-    # Validate MONSTR — check Supabase registration (skip MONSTR_ASSETS check)
+    # Check MONSTR registration
     row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
     if not row.data:
         await interaction.followup.send(
-            f"❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first.",
-            ephemeral=True
-        )
+            "That MONSTR isn't registered. Use `/pvp_register` first.", ephemeral=True)
         return
     if row.data[0]["owner_id"] != user_id:
-        await interaction.followup.send("❌ That MONSTR isn't yours.", ephemeral=True)
+        await interaction.followup.send("That MONSTR isn't yours.", ephemeral=True)
         return
+
+    # Check 30-min cooldown
+    cd_row = db.table("pvp_cooldowns").select("expires_at") \
+               .eq("asa_id", str(asa_id)).execute()
+    if cd_row.data:
+        from datetime import datetime, timezone
+        expires = datetime.fromisoformat(cd_row.data[0]["expires_at"])
+        now     = datetime.now(timezone.utc)
+        if expires > now:
+            mins = int((expires - now).total_seconds() / 60) + 1
+            await interaction.followup.send(
+                f"That MONSTR is cooling down. Ready in **{mins} min**.", ephemeral=True)
+            return
+
+    # Check MONSTR not already in a battle (either room)
+    goo_challenger  = _board.challenger
+    algo_challenger = _board_algo.challenger
+    for challenger in [goo_challenger, algo_challenger]:
+        if challenger and challenger["asa_id"] == str(asa_id):
+            await interaction.followup.send(
+                "That MONSTR is already in an active battle!", ephemeral=True)
+            return
 
     stats = _load_stats(asa_id, user_id)
     if not stats:
-        await interaction.followup.send("❌ Couldn't load MONSTR stats. Try again.", ephemeral=True)
+        await interaction.followup.send("Couldn't load stats. Try again.", ephemeral=True)
         return
 
     username = interaction.user.display_name
 
-    if _board.is_empty:
-        # ── First player — become challenger ──
-        _board.challenger = {
+    if board.is_empty:
+        board.challenger = {
             "user_id":  user_id,
             "asa_id":   str(asa_id),
             "stats":    stats,
             "username": username,
+            "room":     room,
         }
         await interaction.followup.send(
-            f"✅ **{stats.name}** is in the arena! Waiting for an opponent...",
-            ephemeral=True
-        )
-        # Update board image to waiting state with challenger's MONSTR
-        channel = interaction.channel
+            f"**{stats.name}** is in the arena! Waiting for an opponent...",
+            ephemeral=True)
         bp1 = _to_board_player(stats, username)
-        await _update_board(channel, "waiting", p1=bp1, status_text="Waiting for opponent...")
-
+        await _update_board(interaction.channel, "waiting", room, p1=bp1,
+                            status_text="Waiting for opponent...")
     else:
-        # ── Second player — start battle ──
-        if _board.challenger["user_id"] == user_id:
+        if board.challenger["user_id"] == user_id:
             await interaction.followup.send(
-                "You're already waiting for an opponent!", ephemeral=True
-            )
+                "You're already waiting for an opponent!", ephemeral=True)
             return
 
         await interaction.followup.send(
-            f"✅ **{stats.name}** enters the arena! Battle starting...",
-            ephemeral=True
-        )
+            f"**{stats.name}** enters the arena! Battle starting...", ephemeral=True)
 
-        challenger = _board.challenger
-        _board.reset()
+        challenger = board.challenger
+        board.reset()
 
-        # Run battle via the cog — need a reference, use bot
         cog = interaction.client.cogs.get("PvPCog")
-        print(f"[PVP] Cog lookup: {cog}, available cogs: {list(interaction.client.cogs.keys())}")
         if cog:
-            print(f"[PVP] Starting battle: {challenger['user_id']} vs {user_id}")
             asyncio.ensure_future(cog._run_board_battle(
                 channel    = interaction.channel,
                 db         = db,
+                room       = room,
                 chal_id    = challenger["user_id"],
                 chal_asa   = challenger["asa_id"],
                 chal_stats = challenger["stats"],
@@ -783,42 +816,41 @@ async def _on_monstr_picked(interaction: discord.Interaction,
                 opp_uname  = username,
             ))
         else:
-            print("[PVP] ERROR: Could not find PvPCog!")
-            await interaction.channel.send("❌ Battle system error — cog not found.")
+            await interaction.channel.send("Battle system error — cog not found.")
 
 
 # ─────────────────────────────────────────────
 # BOARD UPDATE HELPER
 # ─────────────────────────────────────────────
 
-async def _update_board(channel, state: str,
+async def _update_board(channel, state: str, room: str = "goo",
                         p1=None, p2=None, status_text: str = ""):
-    """
-    Edit the persistent board message image in-place.
-    Shows Join Battle button only when waiting, not during active battle.
-    """
-    buf  = await asyncio.to_thread(render_board, state, p1, p2, status_text)
-    file = discord.File(buf, filename="board.png")
-    view = JoinBattleView() if state in ("waiting",) else None
+    """Edit the persistent board message in-place for the given room."""
+    board = _get_board(room)
+    buf   = await asyncio.to_thread(render_board, state, p1, p2, status_text)
+    file  = discord.File(buf, filename="board.png")
+    view  = JoinBattleView() if state == "waiting" else discord.ui.View()
 
     try:
-        if _board.board_msg_id:
-            msg = await channel.fetch_message(_board.board_msg_id)
-            if view:
-                await msg.edit(attachments=[file], view=view)
-            else:
-                await msg.edit(attachments=[file], view=discord.ui.View())
+        if board.board_msg_id:
+            msg = await channel.fetch_message(board.board_msg_id)
+            await msg.edit(attachments=[file], view=view)
             return
     except Exception:
         pass
 
-    # Post fresh if message not found
-    msg = await channel.send(file=file, view=view or discord.ui.View())
-    _board.board_msg_id = msg.id
+    msg = await channel.send(file=file, view=view if state == "waiting" else None)
+    board.board_msg_id = msg.id
+    # Persist to Supabase for reload on redeploy
+    try:
+        _db().table("pvp_board_state").upsert({
+            "room":         room,
+            "board_msg_id": str(msg.id),
+        }, on_conflict="room").execute()
+    except Exception:
+        pass
 
 
-# ─────────────────────────────────────────────
-# COG
 # ─────────────────────────────────────────────
 
 
@@ -878,6 +910,55 @@ class PvPCog(commands.Cog):
         self.poll_deposits.cancel()
         self.poll_algo_deposits.cancel()
         self.expire_challenges.cancel()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Reload persistent boards on redeploy."""
+        await self._reload_boards()
+
+    async def _reload_boards(self):
+        """Re-attach JoinBattleView to stored board messages on startup."""
+        await asyncio.sleep(3)  # give bot time to fully connect
+        try:
+            db = _db()
+            for room, board, env_key in [
+                ("goo",  _board,      "DISCORD_PVP_CHANNEL_ID"),
+                ("algo", _board_algo, "DISCORD_ALGO_CHANNEL_ID"),
+            ]:
+                ch_val = os.environ.get(env_key, "")
+                if not ch_val.strip().isdigit():
+                    continue
+                ch_id = int(ch_val)
+                channel = self.bot.get_channel(ch_id)
+                if not channel:
+                    continue
+
+                # Check Supabase for stored board msg id
+                row = db.table("pvp_board_state").select("board_msg_id") \
+                         .eq("room", room).execute()
+                if row.data and row.data[0]["board_msg_id"]:
+                    msg_id = int(row.data[0]["board_msg_id"])
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        board.board_msg_id = msg_id
+                        await msg.edit(view=JoinBattleView())
+                        print(f"[PVP] Reattached {room} board msg {msg_id}")
+                        continue
+                    except Exception:
+                        pass
+
+                # No stored board — post a fresh one
+                buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+                file = discord.File(buf, filename="board.png")
+                msg  = await channel.send(file=file, view=JoinBattleView())
+                board.board_msg_id = msg.id
+                db.table("pvp_board_state").upsert({
+                    "room":         room,
+                    "board_msg_id": str(msg.id),
+                }, on_conflict="room").execute()
+                print(f"[PVP] Posted new {room} board in channel {ch_id}")
+        except Exception as e:
+            print(f"[PVP] _reload_boards error: {e}")
 
     # ─────────────────────────────────────────
     # /pvp_deposit — show deposit instructions
@@ -1428,37 +1509,48 @@ class PvPCog(commands.Cog):
             _credit_algo(db, user_id, bal, "withdrawal refund")
             await interaction.followup.send(f"Withdrawal failed, balance refunded. {e}", ephemeral=True)
 
-    # /pvp_setupboard — post persistent board
+    # /pvp_setupboard + /pvp_setupboard_algo
     # ─────────────────────────────────────────
 
     @discord.app_commands.command(
         name="pvp_setupboard",
-        description="(Admin) Post the persistent PvP battle board in this channel"
+        description="(Admin) Post the GOO battle board in this channel"
     )
     @discord.app_commands.default_permissions(administrator=True)
     async def pvp_setupboard(self, interaction: discord.Interaction):
-        if await _wrong_channel(interaction):
-            return
+        if await _wrong_channel(interaction): return
         await interaction.response.defer(ephemeral=True)
-
         buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
         _board.board_msg_id = msg.id
         _board.reset()
+        await interaction.followup.send("GOO battle board posted! Pin it.", ephemeral=True)
 
-        await interaction.followup.send(
-            f"✅ Battle board posted! Pin it to keep it visible.",
-            ephemeral=True
-        )
+    @discord.app_commands.command(
+        name="pvp_setupboard_algo",
+        description="(Admin) Post the ALGO battle board in this channel"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def pvp_setupboard_algo(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+        file = discord.File(buf, filename="board.png")
+        msg  = await interaction.channel.send(file=file, view=JoinBattleView())
+        _board_algo.board_msg_id = msg.id
+        _board_algo.reset()
+        await interaction.followup.send("ALGO battle board posted! Pin it.", ephemeral=True)
 
     # ─────────────────────────────────────────
     # BATTLE RUNNER — round by round with delays
     # ─────────────────────────────────────────
 
+
     async def _run_and_post_battle(self, channel, db: object, duel_id: int,
                                     a: MonstrStats, b: MonstrStats,
-                                    chal_id: str, opp_id: str):
+                                    chal_id: str, opp_id: str,
+                                    room: str = "goo"):
         result: BattleResult = await asyncio.to_thread(resolve_battle, a, b)
         battle_log = [
             {"round": r.round_num, "attacker": r.attacker_id, "damage": r.damage,
@@ -1547,23 +1639,27 @@ class PvPCog(commands.Cog):
             await channel.send(f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
                 + f"**+{GOO_WINNER_CUT_1V1:,} $GOO** credited. GG <@{loser_m.owner_id}>! 💪")
 
-    async def _run_board_battle(self, channel, db: object,
-                                 chal_id: str, chal_asa: str,
-                                 chal_stats: MonstrStats, chal_uname: str,
-                                 opp_id: str, opp_asa: str,
-                                 opp_stats: MonstrStats, opp_uname: str):
-        """Full battle flow triggered from the Join Battle button."""
+    async def _run_board_battle(self, channel, db: object, room: str = "goo",
+                                 chal_id: str = "", chal_asa: str = "",
+                                 chal_stats: MonstrStats = None, chal_uname: str = "",
+                                 opp_id: str = "", opp_asa: str = "",
+                                 opp_stats: MonstrStats = None, opp_uname: str = ""):
+        """Full battle flow for either GOO or ALGO room."""
+        is_algo  = room == "algo"
+        wager    = ALGO_WAGER_1V1 if is_algo else GOO_WAGER_1V1
+        board    = _get_board(room)
+
         bp1 = _to_board_player(chal_stats, chal_uname)
         bp2 = _to_board_player(opp_stats,  opp_uname)
-        await _update_board(channel, "active", bp1, bp2, "⚔️ BATTLE IN PROGRESS")
+        await _update_board(channel, "active", room, bp1, bp2, "⚔️ BATTLE IN PROGRESS")
 
         duel_result = db.table("pvp_duels").insert({
             "challenger_id":  chal_id,
             "opponent_id":    opp_id,
             "challenger_asa": chal_asa,
             "opponent_asa":   opp_asa,
-            "room":           "goo",
-            "wager_amount":   GOO_WAGER_1V1,
+            "room":           room,
+            "wager_amount":   wager,
             "status":         "active",
             "expires_at":     (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         }).execute()
@@ -1571,41 +1667,47 @@ class PvPCog(commands.Cog):
 
         await asyncio.sleep(1)
 
-        chal_bal = _get_balance(db, chal_id)
-        opp_bal  = _get_balance(db, opp_id)
-        print(f"[PVP] Wager check — chal={chal_id} bal={chal_bal}  opp={opp_id} bal={opp_bal}  wager={GOO_WAGER_1V1}")
+        # Lock wagers
+        def lock(uid): return _deduct_algo(db, uid, wager, f"wager duel#{duel_id}") if is_algo else _lock_wager(db, uid, wager, duel_id)
+        def refund(uid, note=""): 
+            if is_algo: _credit_algo(db, uid, wager, note)
+            else: _refund_wager(db, uid, wager, duel_id, note)
+        deposit_cmd = "`/pvp_deposit_algo`" if is_algo else "`/pvp_deposit`"
+        wager_str   = f"{wager/1_000_000:g} ALGO" if is_algo else f"{wager:,} $GOO"
 
-        if not _lock_wager(db, chal_id, GOO_WAGER_1V1, duel_id):
-            await channel.send(
-                f"❌ <@{chal_id}> doesn't have enough $GOO. "
-                f"Need **{GOO_WAGER_1V1:,}**, have **{chal_bal:,}**. "
-                f"Deposit with `/pvp_deposit`. Duel cancelled."
-            )
+        if not lock(chal_id):
+            await channel.send(f"❌ <@{chal_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}.")
             db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
-            await _update_board(channel, "waiting", None, None, "No active challenge")
+            await _update_board(channel, "waiting", room, status_text="No active challenge")
             return
 
-        if not _lock_wager(db, opp_id, GOO_WAGER_1V1, duel_id):
-            _refund_wager(db, chal_id, GOO_WAGER_1V1, duel_id, "opp failed")
-            await channel.send(
-                f"❌ <@{opp_id}> doesn't have enough $GOO. "
-                f"Need **{GOO_WAGER_1V1:,}**, have **{opp_bal:,}**. "
-                f"Deposit with `/pvp_deposit`. Challenger refunded."
-            )
+        if not lock(opp_id):
+            refund(chal_id, "opp failed")
+            await channel.send(f"❌ <@{opp_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}. Challenger refunded.")
             db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
-            await _update_board(channel, "waiting", None, None, "No active challenge")
+            await _update_board(channel, "waiting", room, status_text="No active challenge")
             return
 
         await self._run_and_post_battle(
             channel, db, duel_id,
-            chal_stats, opp_stats, chal_id, opp_id
+            chal_stats, opp_stats, chal_id, opp_id,
+            room=room
         )
 
-        # Post fresh empty board as new message after 4 seconds
+        # Set 30-min cooldown on both MONSTRs
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        for asa in [chal_asa, opp_asa]:
+            db.table("pvp_cooldowns").upsert({
+                "asa_id":     asa,
+                "expires_at": expires,
+            }, on_conflict="asa_id").execute()
+
+        # Reset board after 4 seconds
         await asyncio.sleep(4)
-        _board.reset()
-        _board.board_msg_id = None
-        await _update_board(channel, "waiting", None, None, "No active challenge")
+        board.reset()
+        board.board_msg_id = None
+        await _update_board(channel, "waiting", room, status_text="No active challenge")
+
 
 
     async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
