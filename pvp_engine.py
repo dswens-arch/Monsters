@@ -48,14 +48,35 @@ STAT_BASE         = 10
 STAT_MAX          = 50
 TRAIT_BONUS_MAX   = 5           # max bonus per stat from trait snapshot
 
-# $GOO upgrade cost schedule: list of (min_level, cost_per_upgrade)
-# Level here = current value of the stat (starts at 10)
+# ALGO upgrade cost schedule (in microALGO, 1 ALGO = 1_000_000 microALGO)
+# Steps 1-10:  0.1 ALGO each
+# Steps 11-20: 0.2 ALGO each
+# Steps 21-30: 0.5 ALGO each
+# Steps 31-40: ramps 0.5→2 ALGO (using 1 ALGO avg)
+UPGRADE_COSTS_ALGO = [
+    (41, 2_000_000),   # 2.0 ALGO  (steps 31-40 upper end)
+    (36, 1_000_000),   # 1.0 ALGO  (steps 31-35)
+    (31, 500_000),     # 0.5 ALGO  (steps 21-30)
+    (21, 200_000),     # 0.2 ALGO  (steps 11-20)
+    (1,  100_000),     # 0.1 ALGO  (steps 1-10)
+]
+
+def upgrade_cost_algo(current_stat_value: int) -> int:
+    """Return the upgrade cost in microALGO."""
+    for min_lvl, cost in UPGRADE_COSTS_ALGO:
+        if current_stat_value >= min_lvl:
+            return cost
+    return UPGRADE_COSTS_ALGO[-1][1]
+
+def upgrade_cost_algo_display(current_stat_value: int) -> str:
+    """Return human-readable ALGO cost string."""
+    micro = upgrade_cost_algo(current_stat_value)
+    algo  = micro / 1_000_000
+    return f"{algo:g} ALGO"
+
+# Keep GOO costs for backwards compat (unused now)
 UPGRADE_COSTS = [
-    (41, 2000),
-    (31, 1000),
-    (21, 500),
-    (11, 250),
-    (1,  100),
+    (41, 2000), (31, 1000), (21, 500), (11, 250), (1, 100),
 ]
 
 
@@ -183,6 +204,8 @@ def resolve_battle(a: MonstrStats, b: MonstrStats) -> BattleResult:
     monstr = {a.asa_id: a, b.asa_id: b}
     rounds: list[RoundResult] = []
 
+    spd_diff = abs(a.speed - b.speed)
+
     for round_num in range(1, MAX_ROUNDS + 1):
         for attacker, defender in [(first, second), (second, first)]:
             if hp[defender.asa_id] <= 0 or hp[attacker.asa_id] <= 0:
@@ -205,6 +228,32 @@ def resolve_battle(a: MonstrStats, b: MonstrStats) -> BattleResult:
 
             if remaining <= 0:
                 return BattleResult(
+                    winner_asa   = attacker.asa_id,
+                    loser_asa    = defender.asa_id,
+                    winner_owner = attacker.owner_id,
+                    loser_owner  = defender.owner_id,
+                    rounds       = rounds,
+                    is_draw      = False,
+                    total_rounds = round_num,
+                )
+
+            # SPD double-attack: faster MONSTR gets bonus hit if diff >= 20
+            if attacker == first and spd_diff >= 20 and hp[defender.asa_id] > 0:
+                dmg2, is_crit2 = _calc_damage(attacker, defender)
+                hp[defender.asa_id] -= dmg2
+                remaining2 = max(0, hp[defender.asa_id])
+                fl2 = "⚡ **DOUBLE ATTACK!** " + _flavor(attacker, defender, dmg2, is_crit2, remaining2)
+                rounds.append(RoundResult(
+                    round_num   = round_num,
+                    attacker_id = attacker.asa_id,
+                    defender_id = defender.asa_id,
+                    damage      = dmg2,
+                    is_crit     = is_crit2,
+                    defender_hp = remaining2,
+                    flavor      = fl2,
+                ))
+                if remaining2 <= 0:
+                    return BattleResult(
                     winner_asa   = attacker.asa_id,
                     loser_asa    = defender.asa_id,
                     winner_owner = attacker.owner_id,
