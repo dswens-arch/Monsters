@@ -158,6 +158,15 @@ def _get_linked_wallet(user_id: str) -> Optional[str]:
         return None
 
 
+def _get_bot_keypair():
+    """Return (private_key, address) for the bot wallet."""
+    from algosdk import mnemonic as _mn
+    mn = os.environ["BOT_MNEMONIC"]
+    pk = _mn.to_private_key(mn)
+    addr = _mn.to_public_key(mn)
+    return pk, addr
+
+
 def _get_bot_address() -> str:
     from algosdk import mnemonic, account
     pk = mnemonic.to_private_key(os.environ["BOT_MNEMONIC"])
@@ -303,6 +312,51 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
     except Exception as e:
         print(f"[PVP] ARC-19 resolve failed asa={asa_id}: {e}")
         return None
+
+
+# ─────────────────────────────────────────────
+# ALGO BALANCE HELPERS (custodial, in microALGO)
+# ─────────────────────────────────────────────
+
+def _get_algo_balance(db, user_id: str) -> int:
+    """Return custodial ALGO balance in microALGO."""
+    try:
+        row = db.table("pvp_algo_balances").select("balance").eq("user_id", user_id).execute()
+        return row.data[0]["balance"] if row.data else 0
+    except Exception:
+        return 0
+
+def _credit_algo(db, user_id: str, amount_micro: int, note: str = "") -> int:
+    """Credit microALGO to custodial balance. Returns new balance."""
+    try:
+        row = db.table("pvp_algo_balances").select("balance").eq("user_id", user_id).execute()
+        current = row.data[0]["balance"] if row.data else 0
+        new_bal = current + amount_micro
+        db.table("pvp_algo_balances").upsert({
+            "user_id":    user_id,
+            "balance":    new_bal,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="user_id").execute()
+        return new_bal
+    except Exception as e:
+        print(f"[PVP] _credit_algo failed: {e}")
+        return 0
+
+def _deduct_algo(db, user_id: str, amount_micro: int, note: str = "") -> bool:
+    """Deduct microALGO from custodial balance. Returns True on success."""
+    try:
+        row = db.table("pvp_algo_balances").select("balance").eq("user_id", user_id).execute()
+        current = row.data[0]["balance"] if row.data else 0
+        if current < amount_micro:
+            return False
+        db.table("pvp_algo_balances").update({
+            "balance":    current - amount_micro,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("user_id", user_id).gte("balance", amount_micro).execute()
+        return True
+    except Exception as e:
+        print(f"[PVP] _deduct_algo failed: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -731,6 +785,25 @@ async def _update_board(channel, state: str,
 # ─────────────────────────────────────────────
 
 
+def _get_bot_algo_balance() -> int:
+    """Return the bot wallet ALGO balance in microALGO via algod."""
+    import urllib.request, json as _json
+    try:
+        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        bot_addr  = _get_bot_address()
+        url = f"{algod_url}/v2/accounts/{bot_addr}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+        })
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = _json.loads(r.read())
+        return data.get("account", {}).get("amount", 0)
+    except Exception as e:
+        print(f"[PVP] bot ALGO balance check failed: {e}")
+        return 0
+
+
 def _get_bot_goo_balance() -> int:
     """Return the bot wallet's current $GOO balance via algod."""
     import urllib.request, json as _json
@@ -756,14 +829,17 @@ class PvPCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._pending_duels: dict[str, dict] = {}
-        self._last_bot_goo: int = 0   # snapshot of bot wallet GOO, updated each poll
+        self._last_bot_goo:  int = 0
+        self._last_bot_algo: int = 0
         self.poll_deposits.start()
+        self.poll_algo_deposits.start()
         self.expire_challenges.start()
         # Register persistent view so it survives restarts
         self.bot.add_view(JoinBattleView())
 
     def cog_unload(self):
         self.poll_deposits.cancel()
+        self.poll_algo_deposits.cancel()
         self.expire_challenges.cancel()
 
     # ─────────────────────────────────────────
@@ -1063,7 +1139,7 @@ class PvPCog(commands.Cog):
         monstr_rows = [{"asa_id": r["asa_id"], "monstr_name": r["monstr_name"]} for r in rows.data[:5]]
         view = MonstrPickerView(monstr_rows, on_pick)
         await interaction.followup.send(
-            f"**Choose a MONSTR to upgrade** (balance: **{balance:,} $GOO**):",
+            f"**Choose a MONSTR to upgrade** (upgrades cost ALGO):",
             view=view, ephemeral=True
         )
 
@@ -1114,35 +1190,55 @@ class PvPCog(commands.Cog):
     async def _do_upgrade(self, interaction: discord.Interaction,
                            asa_id: str, stat: str, current_val: int,
                            algo_cost_micro: int, user_id: str, db):
-        """Execute the upgrade — player pays ALGO on-chain to bot wallet, then stat upgrades."""
+        """Deduct from custodial ALGO balance and apply upgrade instantly."""
         await interaction.response.defer(ephemeral=True)
 
         row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
         monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
         algo_display = upgrade_cost_algo_display(current_val)
-        bot_addr = await asyncio.to_thread(_get_bot_address)
-
-        # Show payment instructions — ALGO payment is manual for now
-        # Future: watch for incoming ALGO tx and auto-apply
         new_val = current_val + 1
-        embed = discord.Embed(
-            title=f"📈 Upgrade {monstr_name} — {stat.upper()}",
-            description=(
-                f"**{stat.capitalize()}** {current_val} \u2192 **{new_val}**\n\n"
-                f"Cost: **{algo_display}**\n\n"
-                f"Send **{algo_display}** to the bot wallet, then DM an admin with your TxID:\n"
-                f"`{bot_addr}`"
-            ),
-            color=0xF4B942
-        )
-        embed.set_footer(text="Auto-upgrade detection coming soon — manual confirm for now")
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Log the pending upgrade request
-        _log_transaction(db, user_id, None, "upgrade_pending",
-                         algo_cost_micro,
-                         note=f"{monstr_name} {stat} {current_val}→{new_val} pending ALGO payment")
-        print(f"[PVP] Upgrade pending: uid={user_id} asa={asa_id} {stat} {current_val}→{new_val} cost={algo_display}")
+        # Check custodial ALGO balance
+        algo_bal = _get_algo_balance(db, user_id)
+        if algo_bal < algo_cost_micro:
+            algo_have = algo_bal / 1_000_000
+            algo_need = algo_cost_micro / 1_000_000
+            await interaction.followup.send(
+                f"Not enough ALGO. Need **{algo_need:g} ALGO**, you have **{algo_have:g} ALGO**.\n"
+                f"Use `/pvp_deposit_algo` to top up your Warden wallet.",
+                ephemeral=True
+            )
+            return
+
+        ok = _deduct_algo(db, user_id, algo_cost_micro,
+                          f"upgrade {monstr_name} {stat} {current_val}>{new_val}")
+        if not ok:
+            await interaction.followup.send("Balance error — please try again.", ephemeral=True)
+            return
+
+        db.table("monstr_pvp_stats").update({
+            stat:         new_val,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("asa_id", str(asa_id)).execute()
+
+        new_algo_bal = _get_algo_balance(db, user_id)
+        stats = _load_stats(asa_id, user_id)
+
+        embed = discord.Embed(
+            title=f"MONSTR upgraded!",
+            description=(
+                f"**{stat.capitalize()}** {current_val} to **{new_val}**\n"
+                f"Cost: **{algo_display}**  Balance: **{new_algo_bal/1_000_000:g} ALGO**"
+            ),
+            color=0x1D9E75
+        )
+        if stats:
+            for name, val in format_stats_embed_fields(stats):
+                embed.add_field(name=name, value=val, inline=False)
+        if stats and stats.image_url:
+            embed.set_thumbnail(url=stats.image_url)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val}")
 
     # /pvp_stats
     # ─────────────────────────────────────────
@@ -1180,6 +1276,79 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
+    # /pvp_deposit_algo + /pvp_withdraw_algo
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_deposit_algo",
+        description="Top up your Warden ALGO wallet for upgrades"
+    )
+    async def pvp_deposit_algo(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+        user_id  = str(interaction.user.id)
+        db       = _db()
+        bot_addr = await asyncio.to_thread(_get_bot_address)
+        bal      = _get_algo_balance(db, user_id)
+        embed = discord.Embed(
+            title="ALGO Warden Wallet",
+            description=(
+                "Send any amount of ALGO to your Warden wallet and it credits automatically.\n\n"
+                f"Your current balance: **{bal/1_000_000:g} ALGO**\n\n"
+                "Bot wallet address:"
+            ),
+            color=0xF4B942
+        )
+        embed.set_footer(text="Credited within ~30 seconds of your tx confirming")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(f"`{bot_addr}`", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="pvp_withdraw_algo",
+        description="Withdraw your Warden ALGO balance back to your linked wallet"
+    )
+    async def pvp_withdraw_algo(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+        user_id = str(interaction.user.id)
+        db      = _db()
+        bal     = _get_algo_balance(db, user_id)
+        if bal <= 0:
+            await interaction.followup.send(
+                "No ALGO balance. Use `/pvp_deposit_algo` to add funds.", ephemeral=True
+            )
+            return
+        wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
+        if not wallet:
+            await interaction.followup.send("Link your wallet first with `/link`.", ephemeral=True)
+            return
+        ok = _deduct_algo(db, user_id, bal, "algo withdrawal")
+        if not ok:
+            await interaction.followup.send("Balance error — try again.", ephemeral=True)
+            return
+        try:
+            from algosdk import transaction as _txn
+            from algosdk.v2client import algod as _algod
+            client = _algod.AlgodClient(
+                os.getenv("ALGOD_TOKEN", ""),
+                os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+            )
+            pk, addr = _get_bot_keypair()
+            params  = client.suggested_params()
+            send_amt = max(0, bal - 1000)
+            unsigned = _txn.PaymentTxn(
+                sender=addr, sp=params, receiver=wallet,
+                amt=send_amt, note=b"MONSTRS PvP ALGO withdrawal"
+            )
+            tx_id = client.send_transaction(unsigned.sign(pk))
+            await interaction.followup.send(
+                f"Sent **{send_amt/1_000_000:g} ALGO** to `{wallet[:8]}...` | TxID: `{tx_id}`",
+                ephemeral=True
+            )
+        except Exception as e:
+            _credit_algo(db, user_id, bal, "withdrawal refund")
+            await interaction.followup.send(f"Withdrawal failed, balance refunded. {e}", ephemeral=True)
+
     # /pvp_setupboard — post persistent board
     # ─────────────────────────────────────────
 
