@@ -298,13 +298,13 @@ def format_stats_embed_fields(stats: MonstrStats) -> list[tuple[str, str]]:
     Returns list of (name, value) tuples for Discord embed fields.
     Used in /pvp_stats display.
     """
-    atk_next = upgrade_cost(stats.attack)
-    def_next = upgrade_cost(stats.defense)
-    spd_next = upgrade_cost(stats.speed)
+    atk_next = upgrade_cost_algo_display(stats.attack)
+    def_next = upgrade_cost_algo_display(stats.defense)
+    spd_next = upgrade_cost_algo_display(stats.speed)
 
     return [
-        ("⚔️ Attack",  f"`{stat_bar(stats.attack)}` **{stats.attack}** / {STAT_MAX}  •  next: {atk_next:,} $GOO"),
-        ("🛡️ Defense", f"`{stat_bar(stats.defense)}` **{stats.defense}** / {STAT_MAX}  •  next: {def_next:,} $GOO"),
-        ("⚡ Speed",   f"`{stat_bar(stats.speed)}` **{stats.speed}** / {STAT_MAX}  •  next: {spd_next:,} $GOO"),
+        ("⚔️ Attack",  f"`{stat_bar(stats.attack)}` **{stats.attack}** / {STAT_MAX}  •  next: {atk_next}"),
+        ("🛡️ Defense", f"`{stat_bar(stats.defense)}` **{stats.defense}** / {STAT_MAX}  •  next: {def_next}"),
+        ("⚡ Speed",   f"`{stat_bar(stats.speed)}` **{stats.speed}** / {STAT_MAX}  •  next: {spd_next}"),
         ("❤️ HP",      f"**{stats.hp}**  (base 80 + {stats.defense * BASE_HP_PER_DEF} from DEF)"),
     ]
