@@ -537,15 +537,20 @@ _board = BoardState()
 
 class MonstrPickerView(discord.ui.View):
     """
-    Shows up to 5 MONSTR buttons from the user's registered MONSTRs
-    plus a 6th 'Enter ASA ID' button.
+    Shows up to 5 MONSTRs per page with prev/next navigation.
     Fires join_callback(interaction, asa_id) when a choice is made.
     """
-    def __init__(self, monstr_rows: list[dict], join_callback):
+    def __init__(self, monstr_rows: list[dict], join_callback, page: int = 0):
         super().__init__(timeout=120)
-        self._cb = join_callback
+        self._all_rows = monstr_rows
+        self._cb       = join_callback
+        self._page     = page
+        self._per_page = 5
 
-        for row in monstr_rows[:5]:
+        start = page * self._per_page
+        page_rows = monstr_rows[start:start + self._per_page]
+
+        for row in page_rows:
             btn = discord.ui.Button(
                 label    = row["monstr_name"],
                 style    = discord.ButtonStyle.primary,
@@ -554,12 +559,28 @@ class MonstrPickerView(discord.ui.View):
             btn.callback = self._make_pick_cb(row["asa_id"])
             self.add_item(btn)
 
-        # 6th button — manual entry via modal
+        # Nav row
+        total_pages = (len(monstr_rows) - 1) // self._per_page + 1
+
+        if page > 0:
+            prev_btn = discord.ui.Button(
+                label="◀ Prev", style=discord.ButtonStyle.secondary,
+                custom_id="pick_prev", row=1
+            )
+            prev_btn.callback = self._prev_cb
+            self.add_item(prev_btn)
+
+        if (page + 1) < total_pages:
+            next_btn = discord.ui.Button(
+                label="Next ▶", style=discord.ButtonStyle.secondary,
+                custom_id="pick_next", row=1
+            )
+            next_btn.callback = self._next_cb
+            self.add_item(next_btn)
+
         manual = discord.ui.Button(
-            label    = "Enter ASA ID",
-            style    = discord.ButtonStyle.secondary,
-            custom_id= "pick_manual",
-            row      = 1,
+            label="Enter ASA ID", style=discord.ButtonStyle.secondary,
+            custom_id="pick_manual", row=1
         )
         manual.callback = self._manual_cb
         self.add_item(manual)
@@ -568,6 +589,22 @@ class MonstrPickerView(discord.ui.View):
         async def cb(interaction: discord.Interaction):
             await self._cb(interaction, asa_id)
         return cb
+
+    async def _prev_cb(self, interaction: discord.Interaction):
+        new_view = MonstrPickerView(self._all_rows, self._cb, self._page - 1)
+        total = (len(self._all_rows) - 1) // 5 + 1
+        await interaction.response.edit_message(
+            content=f"Choose a MONSTR (page {self._page}/{total}):",
+            view=new_view
+        )
+
+    async def _next_cb(self, interaction: discord.Interaction):
+        new_view = MonstrPickerView(self._all_rows, self._cb, self._page + 1)
+        total = (len(self._all_rows) - 1) // 5 + 1
+        await interaction.response.edit_message(
+            content=f"Choose a MONSTR (page {self._page + 2}/{total}):",
+            view=new_view
+        )
 
     async def _manual_cb(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ASAModal(self._cb))
@@ -1128,7 +1165,7 @@ class PvPCog(commands.Cog):
                  .eq("owner_id", user_id).execute()
         if not rows.data:
             await interaction.followup.send(
-                "❌ You have no registered MONSTRs. Use `/pvp_register` first.", ephemeral=True
+                "❌ You haven't registered any MONSTRs for PvP yet.\n\nUse `/pvp_register` to register one first, then `/pvp_upgrade` to level it up.", ephemeral=True
             )
             return
 
@@ -1136,7 +1173,7 @@ class PvPCog(commands.Cog):
         async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
             await self._show_stat_picker(pick_interaction, asa_id, user_id, db, balance)
 
-        monstr_rows = [{"asa_id": r["asa_id"], "monstr_name": r["monstr_name"]} for r in rows.data[:5]]
+        monstr_rows = [{"asa_id": r["asa_id"], "monstr_name": r["monstr_name"]} for r in rows.data]
         view = MonstrPickerView(monstr_rows, on_pick)
         await interaction.followup.send(
             f"**Choose a MONSTR to upgrade** (upgrades cost ALGO):",
@@ -1150,7 +1187,7 @@ class PvPCog(commands.Cog):
 
         row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
         if not row.data or row.data[0]["owner_id"] != user_id:
-            await interaction.followup.send("❌ MONSTR not found or not yours.", ephemeral=True)
+            await interaction.followup.send("❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first, then come back to upgrade.", ephemeral=True)
             return
 
         r = row.data[0]
@@ -1239,6 +1276,48 @@ class PvPCog(commands.Cog):
             embed.set_thumbnail(url=stats.image_url)
         await interaction.followup.send(embed=embed, ephemeral=True)
         print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val}")
+
+    # /pvp_roster
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_roster",
+        description="View all your registered MONSTRs and their stats"
+    )
+    async def pvp_roster(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = str(interaction.user.id)
+        db      = _db()
+
+        rows = db.table("monstr_pvp_stats").select("*").eq("owner_id", user_id).execute()
+        if not rows.data:
+            await interaction.followup.send(
+                "You have no registered MONSTRs. Use `/pvp_register` to add one.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"Your MONSTRS Roster ({len(rows.data)} registered)",
+            color=0x1D9E75
+        )
+        for r in rows.data:
+            atk_cost = upgrade_cost_algo_display(r["attack"])
+            def_cost = upgrade_cost_algo_display(r["defense"])
+            spd_cost = upgrade_cost_algo_display(r["speed"])
+            embed.add_field(
+                name=r["monstr_name"],
+                value=(
+                    f"ATK `{r['attack']}` ({atk_cost}) | "
+                    f"DEF `{r['defense']}` ({def_cost}) | "
+                    f"SPD `{r['speed']}` ({spd_cost})\n"
+                    f"ASA: `{r['asa_id']}`"
+                ),
+                inline=False
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # /pvp_stats
     # ─────────────────────────────────────────
