@@ -35,7 +35,7 @@ from supabase import create_client, Client
 from pvp_engine import (
     MonstrStats, BattleResult,
     resolve_battle, format_stats_embed_fields,
-    upgrade_cost, can_upgrade,
+    upgrade_cost, upgrade_cost_algo, upgrade_cost_algo_display, can_upgrade,
     STAT_BASE, STAT_MAX,
 )
 from encounters import MONSTR_ASSETS, send_goo, has_opted_in
@@ -1021,7 +1021,7 @@ class PvPCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"✅ {monstr_name} registered for PvP!",
-            description="Trait bonus locked in. Spend $GOO with `/pvp_upgrade` to level up stats.",
+            description="Trait bonus locked in. Spend ALGO with `/pvp_upgrade` to level up stats.",
             color=0x1D9E75
         )
         for name, val in format_stats_embed_fields(stats):
@@ -1036,7 +1036,7 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_upgrade",
-        description="Spend $GOO to upgrade one of your registered MONSTRs"
+        description="Spend ALGO to upgrade a registered MONSTR's stats"
     )
     async def pvp_upgrade(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction):
