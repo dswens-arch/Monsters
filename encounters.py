@@ -4246,7 +4246,7 @@ class TeamsCog(commands.Cog):
                         if t in held_tiers:
                             cfg = TIER_NFTS[t]
                             move_lines.append(
-                                f"{cfg['move_emoji']} **{cfg['move_name']}**  •  +{int(cfg['dmg_bonus'] * 100)}% dmg  •  {int(cfg['trigger_pct'] * 100)}% chance"
+                                f"{cfg['move_emoji']} **{t.capitalize()} NFT** — {cfg['move_name']}  •  +{int(cfg['dmg_bonus'] * 100)}% dmg  •  {int(cfg['trigger_pct'] * 100)}% chance"
                             )
                     embed.add_field(
                         name="🎖️ Warden NFTs",
