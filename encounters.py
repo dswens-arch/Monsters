@@ -51,7 +51,7 @@ from monstr_teams import (
     get_or_create_team, get_team, resolve_tier, next_tier_info,
     fetch_avatar_url, fetch_monstr_holdings, TIERS,
 )
-from warden_nft import fetch_held_tier_nfts, roll_special_moves, award_tier_nft
+from warden_nft import fetch_held_tier_nfts, roll_special_moves, award_tier_nft, retroactive_nft_send
 
 
 # ─────────────────────────────────────────────
@@ -3840,6 +3840,22 @@ class EncountersCog(commands.Cog):
         # Clear any stale encounter then fire
         self.active_encounter = None
         asyncio.ensure_future(self.run_encounter(boss=True, test_mode=True))
+
+    @discord.app_commands.command(
+        name="retroactivenft",
+        description="[ADMIN] Retroactively send tier NFTs to players who earned them but didn't receive one"
+    )
+    @discord.app_commands.describe(tier="Which tier NFT to distribute (scrapper / fighter / veteran / warlord)")
+    async def retroactive_nft(self, interaction: discord.Interaction, tier: str = "scrapper"):
+        tier = tier.lower().strip()
+        await interaction.response.send_message(
+            f"🔄 Starting retroactive **{tier.capitalize()}** NFT drop — results will post here.",
+            ephemeral=True
+        )
+        channel = interaction.channel
+        asyncio.ensure_future(
+            retroactive_nft_send(self.bot, channel, tier)
+        )
 
 
 # ─────────────────────────────────────────────
