@@ -1856,16 +1856,15 @@ class PvPCog(commands.Cog):
         print(f"[PVP] ALGO poller started — bot wallet: {self._last_bot_algo/1_000_000:g} ALGO")
 
     async def _notify_algo_deposit(self, user_id: str, amount: int, new_bal: int):
-        ch_id = _pvp_channel_id()
+        # Post to ALGO channel first, fall back to GOO channel
+        ch_id = _algo_channel_id() or _pvp_channel_id()
         if not ch_id: return
         try:
             channel = self.bot.get_channel(ch_id)
             if channel:
                 await channel.send(
-                    f"ALGO deposited for <@{user_id}>: "
-                    f"**+{amount/1_000_000:g} ALGO** "
-                    f"Warden balance: **{new_bal/1_000_000:g} ALGO**",
-                    delete_after=30
+                    f"💎 <@{user_id}> deposited **{amount/1_000_000:g} ALGO** "
+                    f"— Warden balance: **{new_bal/1_000_000:g} ALGO**"
                 )
         except Exception as e:
             print(f"[PVP] algo deposit notify failed: {e}")
