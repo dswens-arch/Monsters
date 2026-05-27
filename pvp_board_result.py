@@ -130,7 +130,12 @@ def render_result(winner: WinnerInfo) -> io.BytesIO:
         _t(draw, x1, ty, f"{winner.total_rounds} rounds", fi, COL_GREY)
         ty += F_INFO + gap
 
-        _t(draw, x1, ty, f"+{winner.wager_won:,} $GOO", fi, COL_GREEN)
+        # Format payout — ALGO if > 1M microALGO and not a round GOO number, else $GOO
+        if winner.wager_won >= 1_000_000 and winner.wager_won % 100 != 0:
+            prize = f"+{winner.wager_won/1_000_000:g} ALGO"
+        else:
+            prize = f"+{winner.wager_won:,} $GOO"
+        _t(draw, x1, ty, prize, fi, COL_GREEN)
 
     buf = io.BytesIO()
     board.convert("RGB").save(buf, format="PNG")
