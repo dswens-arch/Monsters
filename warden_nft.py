@@ -302,9 +302,15 @@ async def award_tier_nft(discord_id: str, tier: str, bot=None):
         )
 
         # 7. Increment claimed count
-        await asyncio.to_thread(
-            lambda: db.rpc("increment_nft_claimed", {"tier_name": tier}).execute()
-        )
+        # NOTE: this RPC returns void — postgrest throws a JSON parse error on the
+        # empty 204 response even though the UPDATE executed successfully. We catch
+        # and ignore it; the supply count is updated in the DB regardless.
+        try:
+            await asyncio.to_thread(
+                lambda: db.rpc("increment_nft_claimed", {"tier_name": tier}).execute()
+            )
+        except Exception:
+            pass
 
         # 8. Announce
         remaining = supply["total_supply"] - supply["claimed"] - 1
@@ -317,56 +323,78 @@ async def award_tier_nft(discord_id: str, tier: str, bot=None):
 
 
 # ─────────────────────────────────────────────
-# RETROACTIVE SCRAPPER SEND
+# RETROACTIVE NFT SEND — any tier
 # ─────────────────────────────────────────────
 
-async def retroactive_scrapper_send(bot, channel):
-    """
-    One-shot admin utility — finds all players already at Scrapper tier or above
-    who haven't received the Scrapper NFT yet, and sends it to them.
+# Tiers in progression order — used to determine which tier NFTs a player is owed
+TIER_ORDER = ["scrapper", "fighter", "veteran", "warlord"]
 
-    Wire this to a hidden /admin command or run manually once.
+async def retroactive_nft_send(bot, channel, tier: str = "scrapper"):
     """
+    Admin utility — finds all players at or above `tier` who haven't received
+    that tier's NFT yet, and sends it to them.
+
+    Wire to /retroactivenft admin command. Safe to run multiple times —
+    duplicate guard in award_tier_nft prevents double-sends.
+
+    Args:
+        bot:     discord.py Bot instance
+        channel: channel to post progress updates to
+        tier:    which tier NFT to distribute (default: 'scrapper')
+    """
+    if tier not in TIER_NFTS:
+        await channel.send(f"❌ Unknown tier `{tier}`. Valid: {', '.join(TIER_ORDER)}")
+        return
+
+    cfg = TIER_NFTS[tier]
+    if cfg["asset_id"] is None:
+        await channel.send(f"❌ `{tier}` ASA not configured yet — cannot send.")
+        return
+
     db = _get_supabase()
 
-    # Everyone at scrapper tier or above who hasn't been awarded yet
     try:
+        # Players at this tier or higher
+        eligible_tiers = TIER_ORDER[TIER_ORDER.index(tier):]
         teams = await asyncio.to_thread(
             lambda: db.table("monstr_teams")
                 .select("user_id, tier")
-                .in_("tier", ["scrapper", "fighter", "veteran", "warlord"])
+                .in_("tier", eligible_tiers)
                 .execute()
         )
+
+        # Who already has this tier's NFT
         awarded = await asyncio.to_thread(
             lambda: db.table("warden_nft_awards")
                 .select("discord_id")
-                .eq("tier", "scrapper")
+                .eq("tier", tier)
                 .execute()
         )
         already_awarded = {r["discord_id"] for r in awarded.data}
 
         eligible = [
             r["user_id"] for r in teams.data
-            if r["user_id"] not in already_awarded
+            if str(r["user_id"]) not in already_awarded
         ]
 
+        if not eligible:
+            await channel.send(f"✅ No players are missing the **{tier.capitalize()}** NFT — all caught up.")
+            return
+
         await channel.send(
-            f"🔄 Retroactive Scrapper drop — **{len(eligible)}** eligible players found. Starting..."
+            f"🔄 Retroactive **{tier.capitalize()}** drop — **{len(eligible)}** player(s) found. Starting..."
         )
 
-        sent = 0
-        skipped = 0
         for discord_id in eligible:
-            await award_tier_nft(str(discord_id), "scrapper", bot)
-            await asyncio.sleep(2)  # pace the on-chain sends
-            sent += 1
+            await award_tier_nft(str(discord_id), tier, bot)
+            await asyncio.sleep(2)  # pace on-chain sends
 
         await channel.send(
-            f"✅ Retroactive Scrapper drop complete — **{sent}** processed."
+            f"✅ Retroactive **{tier.capitalize()}** drop complete — **{len(eligible)}** processed."
         )
 
     except Exception as e:
-        logger.error(f"[WARDEN NFT] retroactive_scrapper_send failed: {e}", exc_info=True)
+        logger.error(f"[WARDEN NFT] retroactive_nft_send({tier}) failed: {e}", exc_info=True)
         await channel.send(f"❌ Retroactive drop error: {e}")
 
 
