@@ -276,10 +276,11 @@ async def award_tier_nft(discord_id: str, tier: str, bot=None):
 
         recipient_wallet = wallet_row.data[0]["wallet_address"]
 
-        # 4. Opt-in check
+        # 4. Opt-in check — if not opted in, queue for retry and DM the user
         opted_in = await asyncio.to_thread(_check_opted_in_to_asset, recipient_wallet, asset_id)
         if not opted_in:
-            logger.info(f"[WARDEN NFT] {recipient_wallet[:8]}... not opted into ASA {asset_id}")
+            logger.info(f"[WARDEN NFT] {recipient_wallet[:8]}... not opted into ASA {asset_id} — queuing")
+            queue_pending_nft(discord_id, tier)
             await _notify_opt_in_required(discord_id, tier, asset_id, bot)
             return
 
@@ -370,6 +371,84 @@ async def retroactive_scrapper_send(bot, channel):
 
 
 # ─────────────────────────────────────────────
+# PENDING QUEUE — retry failed opt-in sends
+# ─────────────────────────────────────────────
+
+def queue_pending_nft(discord_id: str, tier: str):
+    """
+    Store a failed NFT send (opt-in not done yet) for later retry.
+    Called when award_tier_nft hits the opt-in wall.
+    """
+    try:
+        db = _get_supabase()
+        db.table("warden_nft_pending").upsert({
+            "discord_id": discord_id,
+            "tier":       tier,
+        }, on_conflict="discord_id,tier").execute()
+        logger.info(f"[WARDEN NFT] Queued pending {tier} NFT for {discord_id}")
+    except Exception as e:
+        logger.error(f"[WARDEN NFT] queue_pending_nft failed: {e}")
+
+
+async def process_pending_nfts():
+    """
+    Retry loop — call this on a background task every 30 minutes.
+    Checks all pending NFTs, attempts to send any where opt-in is now done.
+    """
+    try:
+        db = _get_supabase()
+        pending = await asyncio.to_thread(
+            lambda: db.table("warden_nft_pending").select("discord_id, tier").execute()
+        )
+        if not pending.data:
+            return
+
+        logger.info(f"[WARDEN NFT] Retrying {len(pending.data)} pending NFT(s)...")
+
+        for row in pending.data:
+            discord_id = row["discord_id"]
+            tier = row["tier"]
+            cfg = TIER_NFTS.get(tier)
+            if not cfg or not cfg["asset_id"]:
+                continue
+
+            # Check if wallet is now opted in
+            try:
+                wallet_row = await asyncio.to_thread(
+                    lambda: db.table("linked_wallets")
+                        .select("wallet_address")
+                        .eq("user_id", discord_id)
+                        .execute()
+                )
+                if not wallet_row.data or not wallet_row.data[0].get("wallet_address"):
+                    continue
+
+                wallet = wallet_row.data[0]["wallet_address"]
+                opted_in = await asyncio.to_thread(
+                    _check_opted_in_to_asset, wallet, cfg["asset_id"]
+                )
+                if not opted_in:
+                    continue  # still not opted in — leave in queue
+
+                # Opted in now — remove from pending and send
+                await asyncio.to_thread(
+                    lambda: db.table("warden_nft_pending")
+                        .delete()
+                        .eq("discord_id", discord_id)
+                        .eq("tier", tier)
+                        .execute()
+                )
+                logger.info(f"[WARDEN NFT] Opt-in detected for {discord_id}/{tier} — sending now")
+                await award_tier_nft(discord_id, tier)
+
+            except Exception as e:
+                logger.warning(f"[WARDEN NFT] Retry failed for {discord_id}/{tier}: {e}")
+
+    except Exception as e:
+        logger.error(f"[WARDEN NFT] process_pending_nfts error: {e}", exc_info=True)
+
+
+# ─────────────────────────────────────────────
 # DISCORD NOTIFICATIONS
 # ─────────────────────────────────────────────
 
@@ -394,6 +473,8 @@ async def _announce_award(discord_id, tier, cfg, tx_id, remaining, bot):
     )
 
 
+OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537"
+
 async def _notify_opt_in_required(discord_id, tier, asset_id, bot):
     if not bot:
         return
@@ -403,11 +484,12 @@ async def _notify_opt_in_required(discord_id, tier, asset_id, bot):
         cfg = TIER_NFTS[tier]
         await user.send(
             f"🎖️ Congrats on reaching **{tier_display}** in the Warden system!\n\n"
-            f"You've earned a **Guillotoons X MONSTRS** NFT (ASA `{asset_id}`), "
-            f"but your wallet hasn't opted into the asset yet.\n\n"
-            f"Opt in and let a mod know — we'll get it sent.\n\n"
-            f"Once you hold it, you'll also unlock the **{cfg['move_name']}** "
-            f"special move during encounters."
+            f"You've earned a **Guillotoons X MONSTRS** NFT, but your wallet hasn't opted "
+            f"into the asset yet.\n\n"
+            f"**Opt in here (takes 30 seconds):**\n"
+            f"{OPTIN_URL}\n\n"
+            f"Once you opt in, your NFT will be sent automatically within 30 minutes — no need to do anything else.\n\n"
+            f"Holding it will also unlock the **{cfg['move_name']}** special move during encounters."
         )
     except Exception as e:
         logger.warning(f"[WARDEN NFT] DM failed for {discord_id}: {e}")
