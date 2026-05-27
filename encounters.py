@@ -4234,6 +4234,34 @@ class TeamsCog(commands.Cog):
                     )
             except Exception:
                 pass
+
+            # Warden NFTs & special moves
+            try:
+                from warden_nft import TIER_NFTS, TIER_ORDER
+                nft_awards = db.table("warden_nft_awards").select("tier").eq("discord_id", user_id).execute()
+                held_tiers = {r["tier"] for r in nft_awards.data} if nft_awards.data else set()
+                if held_tiers:
+                    move_lines = []
+                    for t in TIER_ORDER:
+                        if t in held_tiers:
+                            cfg = TIER_NFTS[t]
+                            move_lines.append(
+                                f"{cfg['move_emoji']} **{cfg['move_name']}**  •  +{int(cfg['dmg_bonus'] * 100)}% dmg  •  {int(cfg['trigger_pct'] * 100)}% chance"
+                            )
+                    embed.add_field(
+                        name="🎖️ Warden NFTs",
+                        value="\n".join(move_lines),
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="🎖️ Warden NFTs",
+                        value="None yet — reach Scrapper tier (150 BP) to earn your first.",
+                        inline=False
+                    )
+            except Exception:
+                pass
+
             embed.set_footer(text="  •  ".join(footer_parts))
 
             if avatar_url:
