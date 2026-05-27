@@ -2969,10 +2969,12 @@ class EncountersCog(commands.Cog):
         self._last_embed_update: float = 0.0  # timestamp of last embed edit
         self.encounter_scheduler.start()
         self.goo_sender.start()
+        self.nft_retry_loop.start()
 
     def cog_unload(self):
         self.encounter_scheduler.cancel()
         self.goo_sender.cancel()
+        self.nft_retry_loop.cancel()
 
     @tasks.loop(seconds=30)
     async def goo_sender(self):
@@ -3019,6 +3021,21 @@ class EncountersCog(commands.Cog):
 
     @goo_sender.before_loop
     async def before_sender(self):
+        await self.bot.wait_until_ready()
+
+    # ── NFT Pending Retry Loop ──────────────────
+
+    @tasks.loop(minutes=30)
+    async def nft_retry_loop(self):
+        """Retry pending Warden tier NFT sends every 30 minutes."""
+        try:
+            from warden_nft import process_pending_nfts
+            await process_pending_nfts()
+        except Exception as e:
+            print(f"[NFT RETRY] Loop error: {e}")
+
+    @nft_retry_loop.before_loop
+    async def before_nft_retry(self):
         await self.bot.wait_until_ready()
 
     # ── Scheduler ──────────────────────────────
@@ -3925,6 +3942,44 @@ class WalletCog(commands.Cog):
         except Exception as e:
             print(f"[ERROR] link_wallet: {e}")
             await interaction.followup.send("Something went wrong. Try again.", ephemeral=True)
+
+    @discord.app_commands.command(name="optin", description="Opt your wallet into all Guillotoons X MONSTRS NFT assets")
+    async def optin(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537"
+
+        # Check if they have a linked wallet first
+        try:
+            db = get_supabase()
+            wallet_row = db.table("linked_wallets").select("wallet_address").eq("user_id", str(interaction.user.id)).execute()
+            has_wallet = bool(wallet_row.data and wallet_row.data[0].get("wallet_address"))
+        except Exception:
+            has_wallet = False
+
+        wallet_line = (
+            "" if has_wallet
+            else "
+
+⚠️ You haven't linked a wallet yet — use `/link` first so we know where to send your NFTs."
+        )
+
+        await interaction.followup.send(
+            f"🎖️ **Opt into all Guillotoons X MONSTRS NFTs**
+
+"
+            f"Tap the link below and approve the opt-in for all 3 available tier NFTs at once. "
+            f"Once done, any tier NFTs you've earned will be sent to your wallet automatically — no claiming needed.
+
+"
+            f"🔗 **[Opt in now]({OPTIN_URL})**
+
+"
+            f"*Warlord edition will be added when minted.*"
+            + wallet_line,
+            ephemeral=True,
+            suppress_embeds=False,
+        )
 
     @discord.app_commands.command(name="stats", description="View your all-time MONSTR Encounters stats")
     async def stats(self, interaction: discord.Interaction):
