@@ -758,14 +758,23 @@ async def _on_monstr_picked(interaction: discord.Interaction,
                 f"That MONSTR is cooling down. Ready in **{mins} min**.", ephemeral=True)
             return
 
-    # Check MONSTR not already in a battle (either room)
-    goo_challenger  = _board.challenger
-    algo_challenger = _board_algo.challenger
-    for challenger in [goo_challenger, algo_challenger]:
-        if challenger and challenger["asa_id"] == str(asa_id):
+    # Check MONSTR not already queued (in-memory board state)
+    for b in [_board, _board_algo]:
+        if b.challenger and b.challenger["asa_id"] == str(asa_id):
+            await interaction.followup.send(
+                "That MONSTR is already waiting in a battle queue!", ephemeral=True)
+            return
+
+    # Check MONSTR not already in an active duel (Supabase)
+    try:
+        active = db.table("pvp_duels").select("id").eq("status", "active")                    .or_(f"challenger_asa.eq.{asa_id},opponent_asa.eq.{asa_id}").execute()
+        if active.data:
             await interaction.followup.send(
                 "That MONSTR is already in an active battle!", ephemeral=True)
             return
+    except Exception as e:
+        print(f"[PVP] active duel check failed: {e}")
+
 
     stats = _load_stats(asa_id, user_id)
     if not stats:
