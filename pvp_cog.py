@@ -1633,18 +1633,26 @@ class PvPCog(commands.Cog):
                     "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
             except Exception as e: print(f"[PVP] DB draw failed: {e}")
         else:
-            winner_id = result.winner_owner
-            _credit_win(db, winner_id, GOO_WINNER_CUT_1V1, duel_id)
-            # Treasury cut — credit to a designated admin wallet or just log it
-            if GOO_TREASURY_1V1 > 0:
-                _log_transaction(db, "treasury", duel_id, "treasury_cut",
-                                 GOO_TREASURY_1V1, note=f"10% cut duel#{duel_id}")
-            asyncio.ensure_future(self._send_winner_payout(winner_id, GOO_WINNER_CUT_1V1, duel_id))
+            winner_id  = result.winner_owner
+            is_algo    = room == "algo"
+            winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
+            treasury   = ALGO_TREASURY   if is_algo else GOO_TREASURY_1V1
+            if is_algo:
+                _credit_algo(db, winner_id, winner_cut, f"algo win duel#{duel_id}")
+                if treasury > 0:
+                    _log_transaction(db, "treasury", duel_id, "treasury_cut_algo", treasury,
+                                     note=f"10% algo cut duel#{duel_id}")
+            else:
+                _credit_win(db, winner_id, winner_cut, duel_id)
+                if treasury > 0:
+                    _log_transaction(db, "treasury", duel_id, "treasury_cut_goo", treasury,
+                                     note=f"10% goo cut duel#{duel_id}")
+            asyncio.ensure_future(self._send_winner_payout(winner_id, winner_cut, duel_id))
             try:
                 db.table("pvp_duels").update({"status": "complete", "winner_id": winner_id,
                     "winner_asa": result.winner_asa, "battle_log": battle_log,
                     "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
-                print(f"[PVP] Duel #{duel_id} complete winner={winner_id}")
+                print(f"[PVP] Duel #{duel_id} complete winner={winner_id} room={room}")
             except Exception as e:
                 print(f"[PVP] DB failed: {e}")
                 try:
@@ -1658,10 +1666,12 @@ class PvPCog(commands.Cog):
                 win_info = WinnerInfo(monstr_name=a.name, username="draw",
                     total_rounds=result.total_rounds, wager_won=0, image_url=None, is_draw=True)
             else:
-                winner_m = a if result.winner_asa == a.asa_id else b
+                winner_m   = a if result.winner_asa == a.asa_id else b
                 winner_uname = await _get_display_name(channel.guild, winner_m.owner_id)
+                is_algo    = room == "algo"
+                winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
                 win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
-                    total_rounds=result.total_rounds, wager_won=GOO_WINNER_CUT_1V1,
+                    total_rounds=result.total_rounds, wager_won=winner_cut,
                     image_url=winner_m.image_url, is_draw=False)
             result_buf = await asyncio.to_thread(render_result, win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
@@ -1674,10 +1684,14 @@ class PvPCog(commands.Cog):
             await channel.send("Both MONSTRs fought to a standstill — DRAW! "
                 + f"<@{chal_id}> <@{opp_id}> wagers refunded. GG! 🤝")
         else:
-            winner_m = a if result.winner_asa == a.asa_id else b
-            loser_m  = b if result.winner_asa == a.asa_id else a
-            await channel.send(f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
-                + f"**+{GOO_WINNER_CUT_1V1:,} $GOO** credited. GG <@{loser_m.owner_id}>! 💪")
+            winner_m   = a if result.winner_asa == a.asa_id else b
+            loser_m    = b if result.winner_asa == a.asa_id else a
+            is_algo    = room == "algo"
+            winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
+            prize_str  = f"{winner_cut/1_000_000:g} ALGO" if is_algo else f"{winner_cut:,} $GOO"
+            await channel.send(
+                f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
+                + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪")
 
     async def _run_board_battle(self, channel, db: object, room: str = "goo",
                                  chal_id: str = "", chal_asa: str = "",
