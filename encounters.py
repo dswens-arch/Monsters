@@ -3958,23 +3958,16 @@ class WalletCog(commands.Cog):
             has_wallet = False
 
         wallet_line = (
-            "" if has_wallet
-            else "
-
-⚠️ You haven't linked a wallet yet — use `/link` first so we know where to send your NFTs."
+            ""
+            if has_wallet
+            else "\n\n⚠️ You haven't linked a wallet yet — use `/link` first so we know where to send your NFTs."
         )
 
         await interaction.followup.send(
-            f"🎖️ **Opt into all Guillotoons X MONSTRS NFTs**
-
-"
+            f"🎖️ **Opt into all Guillotoons X MONSTRS NFTs**\n\n"
             f"Tap the link below and approve the opt-in for all 3 available tier NFTs at once. "
-            f"Once done, any tier NFTs you've earned will be sent to your wallet automatically — no claiming needed.
-
-"
-            f"🔗 **[Opt in now]({OPTIN_URL})**
-
-"
+            f"Once done, any tier NFTs you've earned will be sent to your wallet automatically — no claiming needed.\n\n"
+            f"🔗 **[Opt in now]({OPTIN_URL})**\n\n"
             f"*Warlord edition will be added when minted.*"
             + wallet_line,
             ephemeral=True,
