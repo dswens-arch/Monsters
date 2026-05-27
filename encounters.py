@@ -51,6 +51,7 @@ from monstr_teams import (
     get_or_create_team, get_team, resolve_tier, next_tier_info,
     fetch_avatar_url, fetch_monstr_holdings, TIERS,
 )
+from warden_nft import fetch_held_tier_nfts, roll_special_moves, award_tier_nft
 
 
 # ─────────────────────────────────────────────
@@ -2373,6 +2374,10 @@ class EncounterState:
         self.total_attacks: int = 0
         self.crit_count:    int = 0
 
+        # Warden NFT cache — populated on each player's first attack, persists for encounter
+        # key: user_id (int) → set of tier keys they hold, e.g. {'scrapper', 'veteran'}
+        self.nft_cache: dict[int, set[str]] = {}
+
         # Per-wave tracking (reset on each new wave)
         self.first_striker:       int | None = None
         self.kill_shotter:        int | None = None
@@ -2428,6 +2433,14 @@ class EncounterState:
         if self.is_boss:
             damage = int(damage * BOSS_MULTIPLIER * 0.6)
 
+        # Warden NFT special moves — roll for each tier NFT the player holds
+        # nft_cache is populated async before register_attack is called (see _process_attack)
+        held_tiers = self.nft_cache.get(user_id, set())
+        special_moves_triggered = roll_special_moves(held_tiers, damage)
+        if special_moves_triggered:
+            special_bonus = sum(bonus for _, _, bonus in special_moves_triggered)
+            damage += special_bonus
+
         # Counter-attack check — scales with wave number
         wave_counter_chance = counter_chance + (self.wave_index * COUNTER_WAVE_SCALING)
         is_counter = random.random() < wave_counter_chance and self.hp > 0
@@ -2464,12 +2477,13 @@ class EncounterState:
             events.append("kill_shot")
 
         return {
-            "damage":       damage,
-            "hp_remaining": self.hp,
-            "max_hp":       self.max_hp,
-            "events":       events,
-            "is_crit":      is_crit,
-            "is_counter":   is_counter,
+            "damage":          damage,
+            "hp_remaining":    self.hp,
+            "max_hp":          self.max_hp,
+            "events":          events,
+            "is_crit":         is_crit,
+            "is_counter":      is_counter,
+            "special_moves":   special_moves_triggered,  # list of (tier_key, move_name, bonus_dmg)
         }
 
     def calculate_payouts(self) -> dict[int, int]:
@@ -3345,10 +3359,29 @@ class EncountersCog(commands.Cog):
                                 f"⚡ <@{uid}> **TIER UP!** Your team just reached **{label}**! "
                                 f"Attack power and stun resistance increased."
                             )
+                            # Award the Guillotoons X MONSTRS tier NFT
+                            asyncio.create_task(
+                                award_tier_nft(str(uid), new_tier, self.bot)
+                            )
                 except Exception as e:
                     print(f"[ERROR] BP award: {e}")
             else:
                 print("[TEST] BP award skipped in test mode")
+
+            # ── One-time retroactive Scrapper NFT drop ──
+            if not test_mode:
+                try:
+                    db_flag = get_supabase()
+                    flag = db_flag.table("bot_flags").select("value").eq("key", "scrapper_drop_done").execute()
+                    if not flag.data:
+                        from warden_nft import retroactive_scrapper_send
+                        asyncio.create_task(retroactive_scrapper_send(self.bot, channel))
+                        db_flag.table("bot_flags").insert({"key": "scrapper_drop_done", "value": "true"}).execute()
+                        print("[SCRAPPER DROP] Retroactive drop triggered")
+                    else:
+                        print("[SCRAPPER DROP] Already done — skipping")
+                except Exception as e:
+                    print(f"[SCRAPPER DROP] {e}")
 
             print("[CLOSE] Encounter fully closed")
 
@@ -3537,6 +3570,24 @@ class EncountersCog(commands.Cog):
             return
         self._attack_cooldowns[user_id] = (now, 0)
 
+        # Warden NFT — fetch which tier NFTs this player holds (once per encounter, cached)
+        if user_id not in state.nft_cache:
+            try:
+                db_nft = get_supabase()
+                wallet_row = db_nft.table("linked_wallets").select("wallet_address").eq("user_id", str(user_id)).execute()
+                if wallet_row.data and wallet_row.data[0].get("wallet_address"):
+                    wallet_addr = wallet_row.data[0]["wallet_address"]
+                    held = await asyncio.wait_for(
+                        asyncio.to_thread(fetch_held_tier_nfts, wallet_addr),
+                        timeout=6
+                    )
+                    state.nft_cache[user_id] = held
+                else:
+                    state.nft_cache[user_id] = set()
+            except Exception as e:
+                print(f"[WARDEN NFT] cache fetch failed for {user_id}: {e}")
+                state.nft_cache[user_id] = set()
+
         # Guard against attacks from a previous wave's message buttons
         # Only applies to direct button presses (tagged_id is None) — tag flow
         # comes via an ephemeral picker so interaction.message won't match
@@ -3568,6 +3619,13 @@ class EncountersCog(commands.Cog):
             lines.append(f"⚡ **CRITICAL HIT!** {attack_emoji} {attack_name} dealt **{result['damage']} damage!**")
         else:
             lines.append(f"{attack_emoji} **{attack_name}** dealt **{result['damage']} damage!**")
+
+        # Special move feedback
+        for tier_key, move_name, bonus_dmg in result.get("special_moves", []):
+            from warden_nft import TIER_NFTS
+            cfg = TIER_NFTS.get(tier_key, {})
+            emoji = cfg.get("move_emoji", "✨")
+            lines.append(f"{emoji} **{move_name}** triggered! (+{bonus_dmg} bonus damage)")
 
         lines.append(self._hp_bar(result["hp_remaining"], result["max_hp"]))
 
@@ -3627,7 +3685,16 @@ class EncountersCog(commands.Cog):
             await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
-        # Counter-attack is ephemeral only — no public announcement
+
+        # Public special move announcements
+        for tier_key, move_name, bonus_dmg in result.get("special_moves", []):
+            from warden_nft import TIER_NFTS
+            cfg = TIER_NFTS.get(tier_key, {})
+            emoji = cfg.get("move_emoji", "✨")
+            await channel.send(
+                f"{emoji} **{move_name}!** <@{user_id}>'s Warden NFT activated — "
+                f"+{bonus_dmg} bonus damage!"
+            )
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
