@@ -3078,11 +3078,16 @@ class EncountersCog(commands.Cog):
 
         hour   = random.randint(10, 13) if slot == "am" else random.randint(18, 21)
         minute = random.randint(0, 59)
+
+        # Always use a fresh 'now' — base only provides the target date
+        now = datetime.now(timezone.utc)
         scheduled = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        now = datetime.now(timezone.utc)
+        # If the picked time has already passed today, push to tomorrow
         if scheduled <= now:
-            scheduled += timedelta(days=1)
+            scheduled = (now + timedelta(days=1)).replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
 
         self._next_encounters[slot] = {
             "time":    scheduled,
@@ -3391,8 +3396,7 @@ class EncountersCog(commands.Cog):
                     db_flag = get_supabase()
                     flag = db_flag.table("bot_flags").select("value").eq("key", "scrapper_drop_done").execute()
                     if not flag.data:
-                        from warden_nft import retroactive_scrapper_send
-                        asyncio.create_task(retroactive_scrapper_send(self.bot, channel))
+                        asyncio.create_task(retroactive_nft_send(self.bot, channel, "scrapper"))
                         db_flag.table("bot_flags").insert({"key": "scrapper_drop_done", "value": "true"}).execute()
                         print("[SCRAPPER DROP] Retroactive drop triggered")
                     else:
@@ -3702,16 +3706,6 @@ class EncountersCog(commands.Cog):
             await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
-
-        # Public special move announcements
-        for tier_key, move_name, bonus_dmg in result.get("special_moves", []):
-            from warden_nft import TIER_NFTS
-            cfg = TIER_NFTS.get(tier_key, {})
-            emoji = cfg.get("move_emoji", "✨")
-            await channel.send(
-                f"{emoji} **{move_name}!** <@{user_id}>'s Warden NFT activated — "
-                f"+{bonus_dmg} bonus damage!"
-            )
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
