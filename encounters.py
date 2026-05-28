@@ -4003,7 +4003,7 @@ class WalletCog(commands.Cog):
     async def optin(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537"
+        OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537,3574711926"
 
         # Check if they have a linked wallet first
         try:
@@ -4023,8 +4023,7 @@ class WalletCog(commands.Cog):
             f"🎖️ **Opt into all Guillotoons X MONSTRS NFTs**\n\n"
             f"Tap the link below and approve the opt-in for all 3 available tier NFTs at once. "
             f"Once done, any tier NFTs you've earned will be sent to your wallet automatically — no claiming needed.\n\n"
-            f"🔗 **[Opt in now]({OPTIN_URL})**\n\n"
-            f"*Warlord edition will be added when minted.*"
+            f"🔗 **[Opt in now]({OPTIN_URL})**"
             + wallet_line,
             ephemeral=True,
             suppress_embeds=False,
