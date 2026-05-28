@@ -945,6 +945,7 @@ class PvPCog(commands.Cog):
         self._pending_duels: dict[str, dict] = {}
         self._last_bot_goo:  int = 0
         self._last_bot_algo: int = 0
+        self._wallet_goo_cache: dict = {}
         self.poll_deposits.start()
         self.poll_algo_deposits.start()
         self.expire_challenges.start()
@@ -1030,7 +1031,6 @@ class PvPCog(commands.Cog):
                 f"Your balance will be credited within ~{DEPOSIT_POLL_SECONDS} seconds.\n\n"
                 f"Your current PvP balance: **{balance:,} $GOO**\n\n"
                 f"Entry: **{GOO_WAGER_1V1:,} $GOO** per battle\n"
-                f"Upgrades: **100–2,000 $GOO** per level"
             ),
             color=0x1D9E75
         )
@@ -1953,13 +1953,7 @@ class PvPCog(commands.Cog):
             print(f"[PVP] algo deposit notify failed: {e}")
 
     async def _process_deposits(self):
-        """
-        Poll bot wallet GOO balance via algod. Credit the difference to
-        whichever linked wallet sent the most recent deposit.
-
-        Balance-diff approach avoids transaction history queries which
-        are blocked by algonode's free tier on cloud IPs.
-        """
+        """GOO deposit detection via balance-diff + wallet scanning fallback."""
         current_bal = await asyncio.to_thread(_get_bot_goo_balance)
         diff = current_bal - self._last_bot_goo
 
@@ -1967,29 +1961,19 @@ class PvPCog(commands.Cog):
             self._last_bot_goo = current_bal
             return
 
-        # Balance increased — find who sent it via indexer account asset lookup
-        # Use the indexer only for linked wallet balance checks (allowed endpoint)
+        print(f"[PVP] GOO balance up {diff:,} — scanning for depositor")
         db  = _db()
-        amt = diff
-
-        # Try to match to a linked wallet by checking each one's recent balance
-        # Simplest: credit the deposit to whoever has a pending deposit request
-        # For now: broadcast to channel and ask them to use /pvp_confirm_deposit
-        # Advanced: use indexer tx lookup with retry (implemented below)
-
         credited = False
+
+        # Try tx history first
         try:
-            # Attempt tx lookup — may work depending on algonode tier/timing
             import urllib.request, json as _json
             asset_id    = int(os.environ["GOO_ASSET_ID"])
             bot_addr    = await asyncio.to_thread(_get_bot_address)
             indexer_url = os.environ["INDEXER_URL"]
             url = (
                 f"{indexer_url}/v2/transactions"
-                f"?asset-id={asset_id}"
-                f"&address={bot_addr}"
-                f"&address-role=receiver"
-                f"&limit=10"
+                f"?asset-id={asset_id}&address={bot_addr}&address-role=receiver&limit=10"
             )
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=8) as r:
@@ -2000,40 +1984,72 @@ class PvPCog(commands.Cog):
 
             for txn in data.get("transactions", []):
                 tx_id = txn.get("id", "")
-                if not tx_id or tx_id in seen_ids:
-                    continue
-                asset_transfer = txn.get("asset-transfer-transaction", {})
-                if asset_transfer.get("asset-id") != asset_id:
-                    continue
-                if asset_transfer.get("receiver") != bot_addr:
-                    continue
+                if not tx_id or tx_id in seen_ids: continue
+                at = txn.get("asset-transfer-transaction", {})
+                if at.get("asset-id") != asset_id: continue
+                if at.get("receiver") != bot_addr: continue
                 sender = txn.get("sender", "")
-                amount = asset_transfer.get("amount", 0)
-                if amount <= 0 or not sender:
-                    continue
+                amount = at.get("amount", 0)
+                if amount <= 0 or not sender: continue
 
                 wallet_row = db.table("linked_wallets").select("user_id").eq("wallet_address", sender).execute()
                 db.table("pvp_seen_deposits").insert({"tx_id": tx_id, "note": f"amt={amount}"}).execute()
-
                 if not wallet_row.data:
-                    print(f"[PVP] deposit from unknown wallet {sender[:8]}... amount={amount}")
+                    print(f"[PVP] deposit from unknown wallet {sender[:8]} amount={amount}")
                     continue
-
                 user_id = wallet_row.data[0]["user_id"]
                 new_bal = _credit(db, user_id, amount, note=f"deposit tx={tx_id[:16]}")
                 _log_transaction(db, user_id, None, "deposit", amount, sender, tx_id)
-                print(f"[PVP] deposit credited uid={user_id} amount={amount} new_bal={new_bal}")
+                print(f"[PVP] GOO deposit credited uid={user_id} amount={amount} bal={new_bal}")
                 asyncio.ensure_future(self._notify_deposit(user_id, amount, new_bal))
                 credited = True
 
         except Exception as e:
-            # Indexer tx lookup failed (403 etc) — fall back to manual confirm
             if "403" not in str(e):
-                print(f"[PVP] deposit tx lookup error: {e}")
-            # Don't notify for unmatched — could be encounters payouts or other bot activity
-            pass
+                print(f"[PVP] tx lookup error: {e}")
+
+        # Fallback: scan each linked wallet's GOO balance to find who sent it
+        if not credited:
+            try:
+                import urllib.request, json as _json
+                asset_id    = int(os.environ["GOO_ASSET_ID"])
+                indexer_url = os.environ["INDEXER_URL"]
+                wallets     = db.table("linked_wallets").select("user_id,wallet_address").execute()
+
+                for w in (wallets.data or []):
+                    wallet_addr = w["wallet_address"]
+                    user_id     = w["user_id"]
+                    cache_key   = f"goo_bal_{user_id}"
+
+                    # Get current GOO balance of this wallet
+                    try:
+                        url = f"{indexer_url}/v2/accounts/{wallet_addr}/assets/{asset_id}"
+                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req, timeout=6) as r:
+                            data = _json.loads(r.read())
+                        cur_wallet_bal = data.get("asset-holding", {}).get("amount", 0)
+                    except Exception:
+                        continue
+
+                    # Compare to cached balance
+                    prev = self._wallet_goo_cache.get(wallet_addr, cur_wallet_bal)
+                    self._wallet_goo_cache[wallet_addr] = cur_wallet_bal
+
+                    if prev > cur_wallet_bal:
+                        # Their balance decreased — they sent GOO
+                        sent = prev - cur_wallet_bal
+                        if abs(sent - diff) < diff * 0.1:  # within 10% of what we received
+                            new_bal = _credit(db, user_id, diff, note="deposit wallet-scan")
+                            print(f"[PVP] GOO deposit matched via wallet scan uid={user_id} amount={diff} bal={new_bal}")
+                            asyncio.ensure_future(self._notify_deposit(user_id, diff, new_bal))
+                            credited = True
+                            break
+
+            except Exception as e:
+                print(f"[PVP] wallet scan fallback error: {e}")
 
         self._last_bot_goo = current_bal
+
 
 
     async def _notify_deposit(self, user_id: str, amount: int, new_bal: int):
