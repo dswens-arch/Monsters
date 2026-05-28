@@ -70,7 +70,7 @@ TIER_NFTS = {
         "supply":      69,
     },
     "warlord": {
-        "asset_id":    None,       # TODO: fill in after mint
+        "asset_id":    3574711926,
         "move_name":   "Reign of Ruin",
         "move_emoji":  "💀",
         "dmg_bonus":   0.60,
@@ -504,7 +504,7 @@ async def _announce_award(discord_id, tier, cfg, tx_id, remaining, bot):
     )
 
 
-OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537"
+OPTIN_URL = "https://www.wen.tools/bulk-asset-manager?tab=optin&ids=3574705357,3574701634,3574696537,3574711926"
 
 async def _notify_opt_in_required(discord_id, tier, asset_id, bot):
     if not bot:
