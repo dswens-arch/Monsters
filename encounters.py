@@ -4021,8 +4021,8 @@ class WalletCog(commands.Cog):
 
         await interaction.followup.send(
             f"🎖️ **Opt into all Guillotoons X MONSTRS NFTs**\n\n"
-            f"Tap the link below and approve the opt-in for all 3 available tier NFTs at once. "
-            f"Once done, any tier NFTs you've earned will be sent to your wallet automatically — no claiming needed.\n\n"
+            f"Tap the link below and approve the opt-in for all 4 Warden tier NFTs at once. "
+            f"Once done, any NFTs you've earned will be sent to your wallet automatically — no claiming needed.\n\n"
             f"🔗 **[Opt in now]({OPTIN_URL})**"
             + wallet_line,
             ephemeral=True,
