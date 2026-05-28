@@ -852,21 +852,30 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         board.reset()
 
         cog = interaction.client.cogs.get("PvPCog")
+        print(f"[PVP] Battle firing: cog={cog is not None} chal={challenger['user_id']} opp={user_id} room={room}")
         if cog:
-            asyncio.ensure_future(cog._run_board_battle(
-                channel    = interaction.channel,
-                db         = db,
-                room       = room,
-                chal_id    = challenger["user_id"],
-                chal_asa   = challenger["asa_id"],
-                chal_stats = challenger["stats"],
-                chal_uname = challenger["username"],
-                opp_id     = user_id,
-                opp_asa    = str(asa_id),
-                opp_stats  = stats,
-                opp_uname  = username,
-            ))
+            async def _run_safe():
+                try:
+                    await cog._run_board_battle(
+                        channel    = interaction.channel,
+                        db         = db,
+                        room       = room,
+                        chal_id    = challenger["user_id"],
+                        chal_asa   = challenger["asa_id"],
+                        chal_stats = challenger["stats"],
+                        chal_uname = challenger["username"],
+                        opp_id     = user_id,
+                        opp_asa    = str(asa_id),
+                        opp_stats  = stats,
+                        opp_uname  = username,
+                    )
+                except Exception as e:
+                    import traceback
+                    print(f"[PVP] _run_board_battle crashed: {e}")
+                    print(traceback.format_exc())
+            asyncio.ensure_future(_run_safe())
         else:
+            print(f"[PVP] ERROR: PvPCog not found. Available: {list(interaction.client.cogs.keys())}")
             await interaction.channel.send("Battle system error — cog not found.")
 
 
