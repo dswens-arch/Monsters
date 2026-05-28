@@ -806,10 +806,11 @@ async def _on_monstr_picked(interaction: discord.Interaction,
                 "That MONSTR is already waiting in a battle queue!", ephemeral=True)
             return
 
-    # Check MONSTR not already in an active duel (Supabase)
+    # Check MONSTR not already in a genuinely active duel (not expired)
     try:
-        a1 = db.table("pvp_duels").select("id").eq("status", "active").eq("challenger_asa", str(asa_id)).execute()
-        a2 = db.table("pvp_duels").select("id").eq("status", "active").eq("opponent_asa",   str(asa_id)).execute()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        a1 = db.table("pvp_duels").select("id").eq("status", "active")                .eq("challenger_asa", str(asa_id)).gt("expires_at", now_iso).execute()
+        a2 = db.table("pvp_duels").select("id").eq("status", "active")                .eq("opponent_asa",   str(asa_id)).gt("expires_at", now_iso).execute()
         if (a1.data or a2.data):
             await interaction.followup.send(
                 "That MONSTR is already in an active battle!", ephemeral=True)
