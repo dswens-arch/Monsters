@@ -1956,6 +1956,7 @@ class PvPCog(commands.Cog):
         """GOO deposit detection via balance-diff + wallet scanning fallback."""
         current_bal = await asyncio.to_thread(_get_bot_goo_balance)
         diff = current_bal - self._last_bot_goo
+        print(f"[PVP] GOO poll: current={current_bal:,} last={self._last_bot_goo:,} diff={diff:,}")
 
         if diff <= 0:
             self._last_bot_goo = current_bal
