@@ -1538,10 +1538,9 @@ class PvPCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         user_id = str(interaction.user.id)
         db      = _db()
-        bal     = _get_algo_balance(db, user_id)
+        bal     = await asyncio.to_thread(_get_algo_balance, db, user_id)
         await interaction.followup.send(
             f"Your Warden ALGO balance: **{bal/1_000_000:g} ALGO**\n"
-            f"Use `/pvp_deposit_algo` to top up or `/pvp_withdraw_algo` to withdraw.",
             f"Use `/pvp_deposit_algo` to top up or `/pvp_withdraw_algo` to withdraw.",
             ephemeral=True
         )
