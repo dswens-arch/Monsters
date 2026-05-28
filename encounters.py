@@ -3069,6 +3069,30 @@ class EncountersCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     def _schedule_next_encounters(self, now: datetime):
+        # On startup/redeploy, check how many encounters already ran today.
+        # If 2 or more have started today, don't schedule any more until tomorrow.
+        try:
+            db = get_supabase()
+            today_str = now.strftime("%Y-%m-%d")
+            rows = db.table("encounters")                 .select("id")                 .gte("started_at", f"{today_str}T00:00:00+00:00")                 .lt("started_at",  f"{today_str}T23:59:59+00:00")                 .execute()
+            todays_count = len(rows.data) if rows.data else 0
+        except Exception as e:
+            print(f"[SCHEDULER] Could not check today's encounter count: {e}")
+            todays_count = 0
+
+        if todays_count >= 2:
+            print(f"[SCHEDULER] {todays_count} encounters already ran today — skipping today, scheduling tomorrow.")
+            tomorrow = now + timedelta(days=1)
+            self._schedule_slot("am", tomorrow)
+            self._schedule_slot("pm", tomorrow)
+            return
+
+        if todays_count == 1:
+            print(f"[SCHEDULER] 1 encounter already ran today — skipping AM slot, scheduling PM only.")
+            self._schedule_slot("pm", now)
+            return
+
+        print(f"[SCHEDULER] No encounters yet today — scheduling both slots.")
         self._schedule_slot("am", now)
         self._schedule_slot("pm", now)
 
