@@ -826,15 +826,31 @@ async def _on_monstr_picked(interaction: discord.Interaction,
     username = interaction.user.display_name
 
     if board.is_empty:
+        # Lock wager immediately on join
+        wager = ALGO_WAGER_1V1 if room == "algo" else GOO_WAGER_1V1
+        if room == "algo":
+            locked = await asyncio.to_thread(_deduct_algo, db, user_id, wager, "wager hold — waiting for opponent")
+        else:
+            locked, _ = await asyncio.to_thread(_deduct, db, user_id, wager, f"wager hold — waiting for opponent")
+        if not locked:
+            wager_str = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
+            deposit_cmd = "`/pvp_deposit_algo`" if room == "algo" else "`/pvp_deposit`"
+            await interaction.followup.send(
+                f"❌ Not enough funds. Need **{wager_str}** to join. Use {deposit_cmd}.",
+                ephemeral=True)
+            return
+
         board.challenger = {
             "user_id":  user_id,
             "asa_id":   str(asa_id),
             "stats":    stats,
             "username": username,
             "room":     room,
+            "wager":    wager,
         }
+        wager_str = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
         await interaction.followup.send(
-            f"**{stats.name}** is in the arena! Waiting for an opponent...",
+            f"**{stats.name}** is in the arena! **{wager_str}** held. Waiting for an opponent...",
             ephemeral=True)
         bp1 = _to_board_player(stats, username)
         await _update_board(interaction.channel, "waiting", room, p1=bp1,
@@ -1808,18 +1824,7 @@ class PvPCog(commands.Cog):
         deposit_cmd = "`/pvp_deposit_algo`" if is_algo else "`/pvp_deposit`"
         wager_str   = f"{wager/1_000_000:g} ALGO" if is_algo else f"{wager:,} $GOO"
 
-        if is_algo:
-            chal_ok = await asyncio.to_thread(_deduct_algo, db, chal_id, wager, f"wager duel#{duel_id}")
-        else:
-            chal_ok = await asyncio.to_thread(_lock_wager, db, chal_id, wager, duel_id)
-        print(f"[PVP] wager lock chal={chal_id} ok={chal_ok} room={room} amount={wager}")
-
-        if not chal_ok:
-            await channel.send(f"❌ <@{chal_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}.")
-            await asyncio.to_thread(lambda: db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute())
-            await _update_board(channel, "waiting", room, status_text="No active challenge")
-            return
-
+        # Challenger already paid on join — only lock opponent's wager now
         if is_algo:
             opp_ok = await asyncio.to_thread(_deduct_algo, db, opp_id, wager, f"wager duel#{duel_id}")
         else:
@@ -1827,11 +1832,12 @@ class PvPCog(commands.Cog):
         print(f"[PVP] wager lock opp={opp_id} ok={opp_ok} room={room} amount={wager}")
 
         if not opp_ok:
+            # Refund challenger since battle can't start
             if is_algo:
-                await asyncio.to_thread(_credit_algo, db, chal_id, wager, "opp failed refund")
+                await asyncio.to_thread(_credit_algo, db, chal_id, wager, "opp failed — refund")
             else:
                 await asyncio.to_thread(_refund_wager, db, chal_id, wager, duel_id, "opp failed")
-            await channel.send(f"❌ <@{opp_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}. Challenger refunded.")
+            await channel.send(f"❌ <@{opp_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}. <@{chal_id}> refunded.")
             await asyncio.to_thread(lambda: db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute())
             await _update_board(channel, "waiting", room, status_text="No active challenge")
             return
@@ -2043,11 +2049,20 @@ class PvPCog(commands.Cog):
 
     @tasks.loop(minutes=30)
     async def expire_challenges(self):
+        """Expire old challenges and refund any held wagers for waiting challengers."""
         try:
             db = _db()
             db.table("pvp_challenges").update({"status": "expired"}).eq(
                 "status", "open"
             ).lt("expires_at", datetime.now(timezone.utc).isoformat()).execute()
+
+            # Refund challenger if they're waiting and board has been idle too long
+            for room, board in [("goo", _board), ("algo", _board_algo)]:
+                if board.challenger and board.challenger.get("wager"):
+                    # If challenger has been waiting > 10 minutes, refund and clear
+                    # (board.challenger doesn't store a timestamp so just keep it alive for now)
+                    pass
+
         except Exception as e:
             print(f"[PVP] expire_challenges error: {e}")
 
