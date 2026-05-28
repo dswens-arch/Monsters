@@ -56,7 +56,7 @@ ALGO_WINNER_CUT    = 9_000_000  # 9 ALGO to winner
 ALGO_TREASURY      = 1_000_000  # 1 ALGO treasury
 
 CHALLENGE_TTL_HOURS = 24
-DEPOSIT_POLL_SECONDS = 30       # how often to check for new deposits
+DEPOSIT_POLL_SECONDS = 60       # how often to check for new deposits
 
 
 # ─────────────────────────────────────────────
@@ -790,7 +790,6 @@ async def _on_monstr_picked(interaction: discord.Interaction,
     cd_row = db.table("pvp_cooldowns").select("expires_at") \
                .eq("asa_id", str(asa_id)).execute()
     if cd_row.data:
-        from datetime import datetime, timezone
         expires = datetime.fromisoformat(cd_row.data[0]["expires_at"])
         now     = datetime.now(timezone.utc)
         if expires > now:
@@ -1797,23 +1796,34 @@ class PvPCog(commands.Cog):
         await asyncio.sleep(1)
 
         # Lock wagers
-        def lock(uid): return _deduct_algo(db, uid, wager, f"wager duel#{duel_id}") if is_algo else _lock_wager(db, uid, wager, duel_id)
-        def refund(uid, note=""): 
-            if is_algo: _credit_algo(db, uid, wager, note)
-            else: _refund_wager(db, uid, wager, duel_id, note)
         deposit_cmd = "`/pvp_deposit_algo`" if is_algo else "`/pvp_deposit`"
         wager_str   = f"{wager/1_000_000:g} ALGO" if is_algo else f"{wager:,} $GOO"
 
-        if not lock(chal_id):
+        if is_algo:
+            chal_ok = await asyncio.to_thread(_deduct_algo, db, chal_id, wager, f"wager duel#{duel_id}")
+        else:
+            chal_ok = await asyncio.to_thread(_lock_wager, db, chal_id, wager, duel_id)
+        print(f"[PVP] wager lock chal={chal_id} ok={chal_ok} room={room} amount={wager}")
+
+        if not chal_ok:
             await channel.send(f"❌ <@{chal_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}.")
-            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await asyncio.to_thread(lambda: db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute())
             await _update_board(channel, "waiting", room, status_text="No active challenge")
             return
 
-        if not lock(opp_id):
-            refund(chal_id, "opp failed")
+        if is_algo:
+            opp_ok = await asyncio.to_thread(_deduct_algo, db, opp_id, wager, f"wager duel#{duel_id}")
+        else:
+            opp_ok = await asyncio.to_thread(_lock_wager, db, opp_id, wager, duel_id)
+        print(f"[PVP] wager lock opp={opp_id} ok={opp_ok} room={room} amount={wager}")
+
+        if not opp_ok:
+            if is_algo:
+                await asyncio.to_thread(_credit_algo, db, chal_id, wager, "opp failed refund")
+            else:
+                await asyncio.to_thread(_refund_wager, db, chal_id, wager, duel_id, "opp failed")
             await channel.send(f"❌ <@{opp_id}> doesn't have enough. Need **{wager_str}**. Use {deposit_cmd}. Challenger refunded.")
-            db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute()
+            await asyncio.to_thread(lambda: db.table("pvp_duels").update({"status": "cancelled"}).eq("id", duel_id).execute())
             await _update_board(channel, "waiting", room, status_text="No active challenge")
             return
 
@@ -1879,7 +1889,7 @@ class PvPCog(commands.Cog):
         print(f"[PVP] GOO deposit poller started")
 
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=120)
     async def poll_algo_deposits(self):
         """ALGO deposit detection via algosdk indexer — same approach as GOO poller."""
         try:
