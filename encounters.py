@@ -3339,8 +3339,16 @@ class EncountersCog(commands.Cog):
                             if old_t != new_t:
                                 label = next(t[1] for t in _TIERS if t[0] == new_t)
                                 await channel.send(
-                                    f"⚡ <@{bp_uid}> **TIER UP!** Your team just reached **{label}**!"
+                                    f"⚡ <@{bp_uid}> **TIER UP!** Your team just reached **{label}**! "
+                                    f"Attack power and stun resistance increased."
                                 )
+                                # Award the Guillotoons X MONSTRS tier NFT
+                                try:
+                                    asyncio.create_task(
+                                        award_tier_nft(bp_uid, new_t, self.bot)
+                                    )
+                                except Exception as nft_e:
+                                    print(f"[NFT] award_tier_nft failed for {bp_uid}/{new_t}: {nft_e}")
             except Exception as e:
                 print(f"[ERROR] Ally history/tag BP: {e}")
 
@@ -3382,9 +3390,13 @@ class EncountersCog(commands.Cog):
                                 f"Attack power and stun resistance increased."
                             )
                             # Award the Guillotoons X MONSTRS tier NFT
-                            asyncio.create_task(
-                                award_tier_nft(str(uid), new_tier, self.bot)
-                            )
+                            print(f"[NFT] Tier-up detected for {uid}: {old_tier} → {new_tier} — firing award_tier_nft")
+                            try:
+                                asyncio.create_task(
+                                    award_tier_nft(str(uid), new_tier, self.bot)
+                                )
+                            except Exception as nft_e:
+                                print(f"[NFT] award_tier_nft failed for {uid}/{new_tier}: {nft_e}")
                 except Exception as e:
                     print(f"[ERROR] BP award: {e}")
             else:
@@ -3706,6 +3718,16 @@ class EncountersCog(commands.Cog):
             await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
+
+        # Public special move announcements
+        for tier_key, move_name, bonus_dmg in result.get("special_moves", []):
+            from warden_nft import TIER_NFTS
+            cfg = TIER_NFTS.get(tier_key, {})
+            emoji = cfg.get("move_emoji", "✨")
+            await channel.send(
+                f"{emoji} **{move_name}!** <@{user_id}>'s Warden NFT activated — "
+                f"+{bonus_dmg} bonus damage!"
+            )
 
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
