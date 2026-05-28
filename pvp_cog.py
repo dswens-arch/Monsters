@@ -572,10 +572,12 @@ class MonstrPickerView(discord.ui.View):
         page_rows = monstr_rows[start:start + self._per_page]
 
         for row in page_rows:
+            disabled = row.get("disabled", False)
             btn = discord.ui.Button(
                 label    = row["monstr_name"],
-                style    = discord.ButtonStyle.primary,
+                style    = discord.ButtonStyle.secondary if disabled else discord.ButtonStyle.primary,
                 custom_id= f"pick_{row['asa_id']}",
+                disabled = disabled,
             )
             btn.callback = self._make_pick_cb(row["asa_id"])
             self.add_item(btn)
@@ -719,11 +721,50 @@ async def _handle_join(interaction: discord.Interaction):
             "No registered MONSTRs. Use `/pvp_register` first.", ephemeral=True)
         return
 
+    # Check cooldowns and in-use for each MONSTR — grey out unavailable ones
+    now = datetime.now(timezone.utc)
+    # Fetch full stats for sorting by power (ATK+DEF+SPD)
+    full_rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name,attack,defense,speed")                   .eq("owner_id", user_id).execute()
+    stat_map = {r["asa_id"]: r for r in (full_rows.data or [])}
+
+    monstr_rows = []
+    for r in rows.data:
+        asa      = r["asa_id"]
+        disabled = False
+        suffix   = ""
+        try:
+            cd = db.table("pvp_cooldowns").select("expires_at").eq("asa_id", asa).execute()
+            if cd.data:
+                expires = datetime.fromisoformat(cd.data[0]["expires_at"])
+                if expires > now:
+                    mins = int((expires - now).total_seconds() / 60) + 1
+                    disabled = True
+                    suffix = f" ({mins}m)"
+        except Exception:
+            pass
+        if not disabled:
+            for b in [_board, _board_algo]:
+                if b.challenger and b.challenger["asa_id"] == asa:
+                    disabled = True
+                    suffix = " (in queue)"
+                    break
+        sr = stat_map.get(asa, {})
+        power = sr.get("attack", 0) + sr.get("defense", 0) + sr.get("speed", 0)
+        monstr_rows.append({
+            "asa_id":      asa,
+            "monstr_name": r["monstr_name"] + suffix,
+            "disabled":    disabled,
+            "power":       power,
+        })
+
+    # Sort: available first by power desc, then disabled by power desc
+    monstr_rows.sort(key=lambda r: (r["disabled"], -r["power"]))
+
     async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
         await _on_monstr_picked(pick_interaction, asa_id, user_id, db, room)
 
     currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
-    view = MonstrPickerView(rows.data, on_pick)
+    view = MonstrPickerView(monstr_rows, on_pick)
     await interaction.followup.send(
         f"**Choose your MONSTR** ({currency} available):",
         view=view, ephemeral=True)
@@ -1485,6 +1526,26 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
+    # /pvp_algo_balance
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_algo_balance",
+        description="Check your Warden ALGO balance for upgrades and ALGO battles"
+    )
+    async def pvp_algo_balance(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+        user_id = str(interaction.user.id)
+        db      = _db()
+        bal     = _get_algo_balance(db, user_id)
+        await interaction.followup.send(
+            f"Your Warden ALGO balance: **{bal/1_000_000:g} ALGO**\n"
+            f"Use `/pvp_deposit_algo` to top up or `/pvp_withdraw_algo` to withdraw.",
+            f"Use `/pvp_deposit_algo` to top up or `/pvp_withdraw_algo` to withdraw.",
+            ephemeral=True
+        )
+
     # /pvp_deposit_algo + /pvp_withdraw_algo
     # ─────────────────────────────────────────
 
