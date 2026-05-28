@@ -227,12 +227,15 @@ async def award_tier_nft(discord_id: str, tier: str, bot=None):
     """
     cfg = TIER_NFTS.get(tier)
     if not cfg:
+        logger.info(f"[WARDEN NFT] Unknown tier '{tier}' — skipping")
         return  # 'raw' or unknown — no NFT
 
     asset_id = cfg["asset_id"]
     if asset_id is None:
         logger.info(f"[WARDEN NFT] {tier} ASA not configured yet — skipping award")
         return
+
+    logger.info(f"[WARDEN NFT] award_tier_nft called — discord_id={discord_id} tier={tier} asset_id={asset_id}")
 
     try:
         db = _get_supabase()
