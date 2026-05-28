@@ -808,8 +808,9 @@ async def _on_monstr_picked(interaction: discord.Interaction,
 
     # Check MONSTR not already in an active duel (Supabase)
     try:
-        active = db.table("pvp_duels").select("id").eq("status", "active")                    .or_(f"challenger_asa.eq.{asa_id},opponent_asa.eq.{asa_id}").execute()
-        if active.data:
+        a1 = db.table("pvp_duels").select("id").eq("status", "active").eq("challenger_asa", str(asa_id)).execute()
+        a2 = db.table("pvp_duels").select("id").eq("status", "active").eq("opponent_asa",   str(asa_id)).execute()
+        if (a1.data or a2.data):
             await interaction.followup.send(
                 "That MONSTR is already in an active battle!", ephemeral=True)
             return
@@ -922,19 +923,25 @@ def _get_bot_algo_balance() -> int:
 
 
 def _get_bot_goo_balance() -> int:
-    """Return the bot wallet GOO balance via indexer."""
+    """Return bot wallet GOO balance via algod (asset holding)."""
     import urllib.request, json as _json
     try:
-        asset_id    = int(os.environ["GOO_ASSET_ID"])
-        indexer_url = os.environ["INDEXER_URL"]
-        bot_addr    = _get_bot_address()
-        url = f"{indexer_url}/v2/accounts/{bot_addr}/assets/{asset_id}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        asset_id  = int(os.environ["GOO_ASSET_ID"])
+        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+        bot_addr  = _get_bot_address()
+        url = f"{algod_url}/v2/accounts/{bot_addr}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+        })
         with urllib.request.urlopen(req, timeout=8) as r:
             data = _json.loads(r.read())
-        return data.get("asset-holding", {}).get("amount", 0)
+        for asset in data.get("account", {}).get("assets", []):
+            if asset.get("asset-id") == asset_id:
+                return asset.get("amount", 0)
+        return 0
     except Exception as e:
-        if "404" not in str(e):
+        if "403" not in str(e) and "404" not in str(e):
             print(f"[PVP] bot GOO balance check failed: {e}")
         return 0
 
