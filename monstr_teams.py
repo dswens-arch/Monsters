@@ -257,10 +257,11 @@ def roll_stun_resist(user_id: str) -> bool:
 # ─────────────────────────────────────────────
 
 # Gateways tried in order — first success wins
+# algonode first: fastest for Algorand collections; cloudflare best for Discord embeds
 IPFS_GATEWAYS = [
-    "https://gateway.pinata.cloud/ipfs/",
+    "https://ipfs.algonode.dev/ipfs/",
     "https://cloudflare-ipfs.com/ipfs/",
-    "https://dweb.link/ipfs/",
+    "https://gateway.pinata.cloud/ipfs/",
     "https://ipfs.io/ipfs/",
 ]
 
@@ -300,9 +301,11 @@ def _fetch_json_gateways(cid, timeout=8):
 def _resolve_image_url(image_field):
     if image_field.startswith("ipfs://"):
         cid = image_field.replace("ipfs://", "").split("?")[0].split("#")[0]
-        return f"https://dweb.link/ipfs/{cid}"
+        # cloudflare is most reliable for Discord embed rendering
+        return f"https://cloudflare-ipfs.com/ipfs/{cid}"
     elif image_field.startswith("https://"):
-        return image_field
+        # Strip ?optimizer=image&width=... params — Discord can't render Pera optimizer URLs
+        return image_field.split("?")[0].split("#")[0]
     return None
 
 
@@ -351,7 +354,11 @@ def fetch_avatar_url(asa_id):
             return f"https://dweb.link/ipfs/{cid}"
 
         elif url_field.startswith("https://"):
-            return url_field
+            # Strip ?optimizer=image&width=... and #arc3 fragments before returning.
+            # Pera/algonode explorer URLs include these and Discord can't render them.
+            clean = url_field.split("?")[0].split("#")[0]
+            print(f"[AVATAR] Direct https URL (cleaned): {clean}")
+            return clean
 
         print(f"[AVATAR] No recognisable URL for ASA {asa_id}: {url_field!r}")
         return None
