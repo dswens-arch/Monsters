@@ -3743,16 +3743,6 @@ class EncountersCog(commands.Cog):
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
 
-        # Public special move announcements
-        for tier_key, move_name, bonus_dmg in result.get("special_moves", []):
-            from warden_nft import TIER_NFTS
-            cfg = TIER_NFTS.get(tier_key, {})
-            emoji = cfg.get("move_emoji", "✨")
-            await channel.send(
-                f"{emoji} **{move_name}!** <@{user_id}>'s Warden NFT activated — "
-                f"+{bonus_dmg} bonus damage!"
-            )
-
         # Update main embed on every attack, respecting Discord's 1/sec rate limit
         import time as _time
         if self.encounter_message:
