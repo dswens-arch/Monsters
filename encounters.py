@@ -3088,13 +3088,27 @@ class EncountersCog(commands.Cog):
             return
 
         if todays_count == 1:
-            print(f"[SCHEDULER] 1 encounter already ran today — skipping AM slot, scheduling PM only.")
-            self._schedule_slot("pm", now)
+            # One encounter ran today. Check if the PM window (18–21 UTC) has already closed.
+            # If it's past 22:00 UTC, both windows are done — schedule tomorrow.
+            if now.hour >= 22:
+                print(f"[SCHEDULER] 1 encounter ran today but PM window has passed — scheduling tomorrow.")
+                tomorrow = now + timedelta(days=1)
+                self._schedule_slot("am", tomorrow)
+                self._schedule_slot("pm", tomorrow)
+            else:
+                print(f"[SCHEDULER] 1 encounter already ran today — skipping AM, scheduling PM only.")
+                self._schedule_slot("pm", now)
             return
 
-        print(f"[SCHEDULER] No encounters yet today — scheduling both slots.")
-        self._schedule_slot("am", now)
-        self._schedule_slot("pm", now)
+        # No encounters yet today.
+        # If the AM window (10–13 UTC) has completely passed, skip it.
+        if now.hour >= 14:
+            print(f"[SCHEDULER] No encounters yet today but AM window has passed — scheduling PM only.")
+            self._schedule_slot("pm", now)
+        else:
+            print(f"[SCHEDULER] No encounters yet today — scheduling both slots.")
+            self._schedule_slot("am", now)
+            self._schedule_slot("pm", now)
 
     def _schedule_slot(self, slot: str, base: datetime):
         db = get_supabase()
@@ -3774,6 +3788,62 @@ class EncountersCog(commands.Cog):
             view.add_item(AttackButton(attack_type=i))
         view.add_item(TagTeammateButton())
         return view
+
+    # ── /nextencounter ─────────────────────────
+
+    @discord.app_commands.command(
+        name="nextencounter",
+        description="[Admin] Show when the next scheduled MONSTR encounters will fire"
+    )
+    async def nextencounter(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        now = datetime.now(timezone.utc)
+        slots = self._next_encounters
+
+        if not slots:
+            await interaction.followup.send(
+                "⚠️ No encounters scheduled yet — scheduler may still be initializing.",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+        for slot_key in ["am", "pm"]:
+            slot = slots.get(slot_key)
+            if not slot:
+                lines.append(f"**{slot_key.upper()}** — not scheduled")
+                continue
+
+            t = slot["time"]
+            fired   = slot.get("fired", False)
+            is_boss = slot.get("is_boss", False)
+            label   = "👹 BOSS" if is_boss else "👾 standard"
+
+            if fired:
+                lines.append(f"**{slot_key.upper()}** — already fired ({label})")
+            else:
+                delta = t - now
+                total_secs = int(delta.total_seconds())
+                if total_secs <= 0:
+                    lines.append(f"**{slot_key.upper()}** — imminent / firing now ({label})")
+                else:
+                    hrs, rem = divmod(total_secs, 3600)
+                    mins = rem // 60
+                    countdown = f"{hrs}h {mins}m" if hrs else f"{mins}m"
+                    ts = int(t.timestamp())
+                    lines.append(
+                        f"**{slot_key.upper()}** — {label}\n"
+                        f"<t:{ts}:F>  •  <t:{ts}:R>  ({countdown})"
+                    )
+
+        embed = discord.Embed(
+            title="🧟 Next MONSTR Encounters",
+            description="\n\n".join(lines),
+            color=0x9b59b6,
+        )
+        embed.set_footer(text=f"Now: {now.strftime('%Y-%m-%d %H:%M UTC')}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /leaderboard ───────────────────────────
 
