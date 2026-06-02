@@ -230,7 +230,7 @@ class GooExtrasCog(commands.Cog):
             )
             # Public channel notification
             await interaction.channel.send(
-                f"💧 {user.mention} just received a **{amount:,} $GOO** tip from the Warden! 🧟"
+                f"🧪 {user.mention} just received a **{amount:,} $GOO** tip from the Warden! 🧟"
             )
         except Exception as e:
             print(f"[TIP] send failed: {e}")
@@ -287,7 +287,7 @@ class GooExtrasCog(commands.Cog):
                     )
                     print(f"[SALE] Sent {SALE_REWARD_AMOUNT} GOO to <@{discord_id}> for {monstr_name} TxID: {tx_id}")
                     await message.channel.send(
-                        f"💧 **{monstr_name}** just found a new home!\n"
+                        f"🧪 **{monstr_name}** just found a new home!\n"
                         f"<@{discord_id}> earned **10,000 $GOO** for the pickup. Welcome to the pack. 🧟"
                     )
                 except Exception as e:
@@ -295,7 +295,7 @@ class GooExtrasCog(commands.Cog):
             else:
                 # Not linked — post a claim prompt
                 await message.channel.send(
-                    f"💧 **{monstr_name}** just sold!\n"
+                    f"🧪 **{monstr_name}** just sold!\n"
                     f"Buyer — **10,000 $GOO** is waiting for you. "
                     f"Link your wallet with `/link` to claim your reward. 🧟"
                 )
