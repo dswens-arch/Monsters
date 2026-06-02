@@ -47,7 +47,11 @@ def get_supabase() -> Client:
 
 
 def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> str:
-    """Send $GOO from the bot hot wallet. Returns tx_id. Raises on failure."""
+    """
+    Send $GOO from the bot hot wallet. Returns tx_id. Raises on failure.
+    Retries up to 3 times with backoff to handle AlgoNode free-tier rate limits.
+    """
+    import time
     from algosdk import mnemonic, transaction, account
     from algosdk.v2client import algod
 
@@ -60,18 +64,33 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
     bot_address = account.address_from_private_key(private_key)
     asset_id = int(os.environ["GOO_ASSET_ID"])
 
-    params = client.suggested_params()
-    txn = transaction.AssetTransferTxn(
-        sender=bot_address,
-        sp=params,
-        receiver=to_address,
-        amt=amount,
-        index=asset_id,
-        note=note.encode(),
-    )
-    signed = txn.sign(private_key)
-    tx_id = client.send_transaction(signed)
-    return tx_id
+    last_error = None
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                wait = 2 ** attempt  # 2s, 4s
+                print(f"[WALLET] Rate limit hit, retrying in {wait}s (attempt {attempt + 1}/3)...")
+                time.sleep(wait)
+
+            params = client.suggested_params()
+            txn = transaction.AssetTransferTxn(
+                sender=bot_address,
+                sp=params,
+                receiver=to_address,
+                amt=amount,
+                index=asset_id,
+                note=note.encode(),
+            )
+            signed = txn.sign(private_key)
+            tx_id = client.send_transaction(signed)
+            return tx_id
+
+        except Exception as e:
+            last_error = e
+            if "403" not in str(e) and "429" not in str(e):
+                raise  # Non-rate-limit error — don't retry
+
+    raise last_error
 
 
 def get_linked_wallet(discord_id: str) -> str | None:
@@ -202,11 +221,16 @@ class GooExtrasCog(commands.Cog):
         try:
             tx_id = await asyncio.to_thread(send_goo, wallet, amount, note)
             print(f"[TIP] {interaction.user} tipped {amount} GOO to {user} ({wallet[:8]}...) TxID: {tx_id}")
+            # Ephemeral confirm for admin
             await interaction.followup.send(
                 f"✅ **{amount:,} $GOO** sent to {user.mention}\n"
                 f"Wallet: `{wallet[:8]}...{wallet[-4:]}`\n"
                 f"TxID: `{tx_id}`",
                 ephemeral=True,
+            )
+            # Public channel notification
+            await interaction.channel.send(
+                f"💧 {user.mention} just received a **{amount:,} $GOO** tip from the Warden! 🧟"
             )
         except Exception as e:
             print(f"[TIP] send failed: {e}")
