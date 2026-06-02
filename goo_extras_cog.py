@@ -247,10 +247,11 @@ class GooExtrasCog(commands.Cog):
         if message.channel.id != self.sales_channel_id:
             return
 
-        # Only process messages from the Downbad Marketplace app/bot
-        if message.author.name != DOWNBAD_BOT_NAME and not (
-            message.author.bot and DOWNBAD_BOT_NAME.lower() in message.author.name.lower()
-        ):
+        # Debug log every message in the sales channel so we can see what's arriving
+        print(f"[SALE DEBUG] author='{message.author.name}' bot={message.author.bot} webhook_id={message.webhook_id} embeds={len(message.embeds)}")
+
+        # Downbad posts as a webhook/app — match on name only (webhook_id varies)
+        if DOWNBAD_BOT_NAME.lower() not in message.author.name.lower():
             return
 
         # Must have embeds
