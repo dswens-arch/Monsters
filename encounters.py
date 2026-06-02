@@ -67,6 +67,8 @@ def get_supabase() -> Client:
 # ─────────────────────────────────────────────
 
 def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> str:
+    """Send $GOO with exponential backoff retry on AlgoNode rate limits (403/429)."""
+    import time as _time
     from algosdk import mnemonic, transaction, account
     from algosdk.v2client import algod
 
@@ -79,43 +81,63 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
     bot_address = account.address_from_private_key(private_key)
     asset_id = int(os.environ["GOO_ASSET_ID"])
 
-    params = client.suggested_params()
-    txn = transaction.AssetTransferTxn(
-        sender=bot_address,
-        sp=params,
-        receiver=to_address,
-        amt=amount,
-        index=asset_id,
-        note=note.encode(),
-    )
-    signed = txn.sign(private_key)
-    tx_id = client.send_transaction(signed)
-    # Fire and forget — don't wait for confirmation
-    # TxID is logged; failed sends fall back to pending_goo automatically
-    return tx_id
+    last_error = None
+    for attempt in range(4):
+        try:
+            if attempt > 0:
+                wait = 2 ** attempt  # 2s, 4s, 8s
+                print(f"[WALLET] send_goo rate limit, retrying in {wait}s (attempt {attempt+1}/4)...")
+                _time.sleep(wait)
+            params = client.suggested_params()
+            txn = transaction.AssetTransferTxn(
+                sender=bot_address,
+                sp=params,
+                receiver=to_address,
+                amt=amount,
+                index=asset_id,
+                note=note.encode(),
+            )
+            signed = txn.sign(private_key)
+            tx_id = client.send_transaction(signed)
+            return tx_id
+        except Exception as e:
+            last_error = e
+            if "403" not in str(e) and "429" not in str(e):
+                raise  # Non-rate-limit error — don't retry
+    raise last_error
 
 def has_opted_in(wallet_address: str) -> bool:
-    from algosdk.v2client import algod
+    """Check $GOO opt-in with exponential backoff retry on AlgoNode rate limits."""
+    import time as _time
     import urllib.request
-    import json
-    try:
-        asset_id = int(os.environ["GOO_ASSET_ID"])
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        url = f"{algod_url}/v2/accounts/{wallet_address}/assets/{asset_id}"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req, timeout=5) as r:
-            r.read()
-        print(f"[WALLET] opt-in confirmed for {wallet_address[:8]}...")
-        return True
-    except Exception as e:
-        if "404" in str(e) or "HTTP Error 404" in str(e):
-            print(f"[WALLET] {wallet_address[:8]}... not opted in to GOO")
-        else:
-            print(f"[WALLET] opt-in check failed: {e}")
-        return False
+    asset_id = int(os.environ["GOO_ASSET_ID"])
+    algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+    url = f"{algod_url}/v2/accounts/{wallet_address}/assets/{asset_id}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+    })
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                wait = 2 ** attempt  # 2s, 4s
+                _time.sleep(wait)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                r.read()
+            print(f"[WALLET] opt-in confirmed for {wallet_address[:8]}...")
+            return True
+        except Exception as e:
+            err = str(e)
+            if "404" in err or "HTTP Error 404" in err:
+                print(f"[WALLET] {wallet_address[:8]}... not opted in to GOO")
+                return False  # definitive — no retry
+            if "403" not in err and "429" not in err:
+                print(f"[WALLET] opt-in check failed: {e}")
+                return False  # unknown error — don't retry
+            # 403/429 — rate limited, retry
+            print(f"[WALLET] opt-in rate limited for {wallet_address[:8]}..., retrying...")
+    print(f"[WALLET] opt-in check exhausted retries for {wallet_address[:8]}...")
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -3010,6 +3032,8 @@ class EncountersCog(commands.Cog):
                     # Mark as sent
                     db.table("goo_balances").update({"balance": 0, "needs_payout": False}).eq("user_id", user_id).execute()
                     print(f"[SENDER] {amount} GOO → {user_id} ({wallet[:8]}...) TxID: {tx_id}")
+                    # Stagger sends to avoid rate limit burst
+                    await asyncio.sleep(2)
 
                 except asyncio.TimeoutError:
                     print(f"[SENDER] Timeout for {user_id}, will retry")
@@ -4456,7 +4480,7 @@ class TeamsCog(commands.Cog):
 
     @discord.app_commands.command(
         name="bp_leaderboard",
-        description="Top 10 MONSTR teams by Battle Points"
+        description="Top 25 MONSTR teams by Battle Points"
     )
     async def bp_leaderboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -4467,7 +4491,7 @@ class TeamsCog(commands.Cog):
                 db.table("monstr_teams")
                 .select("user_id,team_name,total_bp,tier")
                 .order("total_bp", desc=True)
-                .limit(10)
+                .limit(25)
                 .execute()
             )
 
@@ -4489,7 +4513,7 @@ class TeamsCog(commands.Cog):
                 )
 
             embed = discord.Embed(
-                title="💀 MONSTR Battle Leaderboard",
+                title="💀 MONSTR Battle Leaderboard — Top 25",
                 description="\n".join(lines),
                 color=0xf1c40f,
             )
