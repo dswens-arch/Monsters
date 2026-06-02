@@ -976,6 +976,7 @@ class PvPCog(commands.Cog):
         self.bot = bot
         self._pending_duels: dict[str, dict] = {}
         self._last_bot_algo: int = 0
+        self._deposit_active_until: float = 0.0   # epoch timestamp; pollers sleep if past this
         self.poll_deposits.start()
         self.poll_algo_deposits.start()
         self.expire_challenges.start()
@@ -986,6 +987,12 @@ class PvPCog(commands.Cog):
         self.poll_deposits.cancel()
         self.poll_algo_deposits.cancel()
         self.expire_challenges.cancel()
+
+    def _wake_deposit_poller(self, minutes: int = 10):
+        """Activate deposit polling for the next N minutes."""
+        import time
+        self._deposit_active_until = time.time() + (minutes * 60)
+        print(f"[PVP] Deposit poller active for {minutes} min")
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -1068,6 +1075,8 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
         # Wallet address as separate message for easy copying
         await interaction.followup.send(f"`{bot_addr}`", ephemeral=True)
+        # Wake the deposit poller for 10 minutes
+        self._wake_deposit_poller(10)
 
     # ─────────────────────────────────────────
     # /pvp_balance
@@ -1601,6 +1610,8 @@ class PvPCog(commands.Cog):
         embed.set_footer(text="Credited within ~30 seconds of your tx confirming")
         await interaction.followup.send(embed=embed, ephemeral=True)
         await interaction.followup.send(f"`{bot_addr}`", ephemeral=True)
+        # Wake the deposit poller for 10 minutes
+        self._wake_deposit_poller(10)
 
     @discord.app_commands.command(
         name="pvp_withdraw_algo",
@@ -1892,7 +1903,11 @@ class PvPCog(commands.Cog):
         Poll the bot wallet for incoming $GOO transfers and credit
         the sender's PvP balance. Uses pvp_seen_deposits to avoid
         double-crediting.
+        Only runs while a deposit window is active (set by /pvp_deposit).
         """
+        import time
+        if time.time() > self._deposit_active_until:
+            return  # idle — skip this tick
         try:
             await self._process_deposits()
         except Exception as e:
@@ -1906,7 +1921,12 @@ class PvPCog(commands.Cog):
 
     @tasks.loop(seconds=120)
     async def poll_algo_deposits(self):
-        """ALGO deposit detection via algosdk indexer — same approach as GOO poller."""
+        """ALGO deposit detection via algosdk indexer — same approach as GOO poller.
+        Only runs while a deposit window is active (set by /pvp_deposit_algo).
+        """
+        import time
+        if time.time() > self._deposit_active_until:
+            return  # idle — skip this tick
         try:
             bot_addr = await asyncio.to_thread(_get_bot_address)
             db       = _db()
