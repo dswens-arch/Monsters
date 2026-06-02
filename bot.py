@@ -28,6 +28,7 @@ class MonstrsBot(commands.Bot):
         # Load cogs
         await self.load_extension("encounters")
         await self.load_extension("pvp_cog")
+        await self.load_extension("goo_extras_cog")
 
         # Sync slash commands to your guild instantly (vs global which takes up to 1hr)
         guild = discord.Object(id=GUILD_ID)
