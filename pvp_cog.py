@@ -1641,7 +1641,8 @@ class PvPCog(commands.Cog):
             from algosdk.v2client import algod as _algod
             client = _algod.AlgodClient(
                 os.getenv("ALGOD_TOKEN", ""),
-                os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
+                os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud"),
+                headers={"X-Algo-API-Token": os.getenv("ALGOD_TOKEN", "")},
             )
             pk, addr = _get_bot_keypair()
             params  = client.suggested_params()
