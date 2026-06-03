@@ -75,6 +75,7 @@ def send_goo(to_address: str, amount: int, note: str = "MONSTRS GOO reward") -> 
     client = algod.AlgodClient(
         algod_token=os.getenv("ALGOD_TOKEN", ""),
         algod_address=os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud"),
+        headers={"X-Algo-API-Token": os.getenv("ALGOD_TOKEN", "")},
     )
     mn = os.environ["BOT_MNEMONIC"]
     private_key = mnemonic.to_private_key(mn)
