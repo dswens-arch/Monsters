@@ -99,11 +99,11 @@ def fetch_held_tier_nfts(wallet_address: str) -> set[str]:
     Synchronous — wrap in asyncio.to_thread() at the call site.
     """
     try:
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        url = f"{algod_url}/v2/accounts/{wallet_address}"
+        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+        url = f"{indexer_url}/v2/accounts/{wallet_address}/assets"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
         })
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read())
