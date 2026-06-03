@@ -33,6 +33,7 @@ import random
 import asyncio
 import logging
 import urllib.request
+import urllib.parse
 import json
 
 from supabase import create_client
@@ -167,15 +168,17 @@ def _get_supabase():
 def _check_opted_in_to_asset(wallet_address: str, asset_id: int) -> bool:
     """Returns True if the wallet has opted into the given ASA."""
     try:
-        algod_url = os.getenv("ALGOD_URL", "https://mainnet-api.algonode.cloud")
-        url = f"{algod_url}/v2/accounts/{wallet_address}/assets/{asset_id}"
+        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+        params = urllib.parse.urlencode({"asset-id": asset_id})
+        url = f"{indexer_url}/v2/accounts/{wallet_address}/assets?{params}"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0",
-            "X-Algo-API-Token": os.getenv("ALGOD_TOKEN", ""),
+            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
         })
         with urllib.request.urlopen(req, timeout=5) as r:
-            r.read()
-        return True
+            data = json.loads(r.read())
+        assets = data.get("assets", [])
+        return any(a["asset-id"] == asset_id for a in assets)
     except Exception as e:
         if "404" in str(e) or "HTTP Error 404" in str(e):
             return False
