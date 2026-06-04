@@ -1704,23 +1704,24 @@ class PvPCog(commands.Cog):
         try:
             db = _db()
             monstr = monstr.strip()
-            # Resolve by name if not a raw numeric ASA ID
-            if not monstr.isdigit():
-                # Normalize "8", "#8", "#0008", "MONSTR #0008" -> "MONSTR #XXXX"
-                num = monstr.upper().replace("MONSTR", "").replace("#", "").strip()
-                if num.isdigit():
-                    padded = f"MONSTR #{int(num):04d}"
+            # Resolve by name unless it looks like a real ASA ID (large number)
+            num_str = monstr.upper().replace("MONSTR", "").replace("#", "").strip()
+            is_asa_id = num_str.isdigit() and int(num_str) > 9999
+            if is_asa_id:
+                asa_id = num_str
+                display = f"ASA `{num_str}`"
+            else:
+                # Normalize "8", "08", "#0008", "MONSTR #0008" -> "MONSTR #XXXX"
+                if num_str.isdigit():
+                    padded = f"MONSTR #{int(num_str):04d}"
                     row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", padded).execute()
                 else:
-                    row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", f"%{monstr}%").execute()
+                    row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", f"%{num_str}%").execute()
                 if not row.data:
                     await interaction.followup.send(f"Could not find a registered MONSTR matching `{monstr}`.", ephemeral=True)
                     return
                 asa_id = row.data[0]["asa_id"]
                 display = row.data[0]["monstr_name"]
-            else:
-                asa_id = monstr
-                display = f"ASA `{monstr}`"
             new_url = await asyncio.wait_for(
                 asyncio.to_thread(_resolve_arc19_image_url, asa_id),
                 timeout=30
