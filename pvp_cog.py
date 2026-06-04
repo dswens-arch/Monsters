@@ -1693,6 +1693,49 @@ class PvPCog(commands.Cog):
         _board_algo.reset()
         await interaction.followup.send("ALGO battle board posted! Pin it.", ephemeral=True)
 
+    @discord.app_commands.command(
+        name="pvp_refreshimage",
+        description="(Admin) Re-fetch and update the image for a MONSTR by number or ASA ID"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    @discord.app_commands.describe(monstr="MONSTR number (e.g. 8 or #0008) or ASA ID")
+    async def pvp_refreshimage(self, interaction: discord.Interaction, monstr: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            db = get_supabase()
+            monstr = monstr.strip()
+            # Resolve by name if not a raw numeric ASA ID
+            if not monstr.isdigit():
+                # Normalize "8", "#8", "#0008", "MONSTR #0008" -> "MONSTR #XXXX"
+                num = monstr.upper().replace("MONSTR", "").replace("#", "").strip()
+                if num.isdigit():
+                    padded = f"MONSTR #{int(num):04d}"
+                    row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", padded).execute()
+                else:
+                    row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", f"%{monstr}%").execute()
+                if not row.data:
+                    await interaction.followup.send(f"Could not find a registered MONSTR matching `{monstr}`.", ephemeral=True)
+                    return
+                asa_id = row.data[0]["asa_id"]
+                display = row.data[0]["monstr_name"]
+            else:
+                asa_id = monstr
+                display = f"ASA `{monstr}`"
+            new_url = await asyncio.wait_for(
+                asyncio.to_thread(_resolve_arc19_image_url, asa_id),
+                timeout=30
+            )
+            if not new_url:
+                await interaction.followup.send(f"Could not resolve image for {display}. Check the ASA and try again.", ephemeral=True)
+                return
+            db.table("monstr_pvp_stats").update({"image_url": new_url}).eq("asa_id", asa_id).execute()
+            await interaction.followup.send(f"Image updated for **{display}**.\n{new_url}", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("Timed out resolving the image. Try again.", ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] pvp_refreshimage: {e}")
+            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+
     # ─────────────────────────────────────────
     # BATTLE RUNNER — round by round with delays
     # ─────────────────────────────────────────
