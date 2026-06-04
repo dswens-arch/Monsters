@@ -1702,7 +1702,7 @@ class PvPCog(commands.Cog):
     async def pvp_refreshimage(self, interaction: discord.Interaction, monstr: str):
         await interaction.response.defer(ephemeral=True)
         try:
-            db = get_supabase()
+            db = _db()
             monstr = monstr.strip()
             # Resolve by name if not a raw numeric ASA ID
             if not monstr.isdigit():
