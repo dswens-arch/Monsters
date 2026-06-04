@@ -3308,7 +3308,7 @@ class EncountersCog(commands.Cog):
         # ── Post results immediately ──
         print("[CLOSE] Sending results embed...")
         results_embed = self._build_results_embed(state, payouts)
-        await channel.send(embed=results_embed)
+        results_message = await channel.send(embed=results_embed)
         print("[CLOSE] Results embed sent")
 
         # ── Team bonus announcement (always fires, even in test mode) ──
@@ -3423,6 +3423,7 @@ class EncountersCog(commands.Cog):
                     wallet_rows  = db_bp.table("linked_wallets").select("user_id,wallet_address").in_("user_id", attacker_ids).execute()
                     wallet_map   = {r["user_id"]: r["wallet_address"] for r in wallet_rows.data}
 
+                    bp_map = {}
                     for uid, dmg in state.damage_dealt.items():
                         got_kill = uid == state.kill_shotter
                         crits    = state.crit_counts.get(uid, 0)
@@ -3446,6 +3447,7 @@ class EncountersCog(commands.Cog):
                             is_boss=state.is_boss,
                             holdings=holdings,
                         )
+                        bp_map[uid] = bp_earned
                         if old_tier != new_tier:
                             label = next(t[1] for t in TIERS if t[0] == new_tier)
                             await channel.send(
@@ -3462,6 +3464,12 @@ class EncountersCog(commands.Cog):
                                 print(f"[NFT] award_tier_nft failed for {uid}/{new_tier}: {nft_e}")
                 except Exception as e:
                     print(f"[ERROR] BP award: {e}")
+                else:
+                    try:
+                        updated_embed = self._build_results_embed(state, payouts, bp_map)
+                        await results_message.edit(embed=updated_embed)
+                    except Exception as e:
+                        print(f"[ERROR] BP embed edit: {e}")
             else:
                 print("[TEST] BP award skipped in test mode")
 
@@ -3531,7 +3539,7 @@ class EncountersCog(commands.Cog):
         embed.set_footer(text=f"ASA #{state.monstr['asa_id']}")
         return embed
 
-    def _build_results_embed(self, state: EncounterState, payouts: dict[int, int]) -> discord.Embed:
+    def _build_results_embed(self, state: EncounterState, payouts: dict[int, int], bp_map: dict[int, int] | None = None) -> discord.Embed:
         all_waves_done = state.wave_index >= state.total_waves
         defeated = all_waves_done or not state.alive
         color = 0xff0000 if state.is_boss and defeated else (0xff4444 if defeated else 0x888888)
@@ -3558,7 +3566,9 @@ class EncountersCog(commands.Cog):
         for i, (uid, goo) in enumerate(sorted_payouts[:5]):
             medal = medals[i] if i < 3 else "▪️"
             dmg = state.damage_dealt.get(uid, 0)
-            lines.append(f"{medal} <@{uid}> — **{goo:,} $GOO** ({dmg} dmg)")
+            bp = bp_map.get(uid, 0) if bp_map else 0
+            bp_str = f"  •  ⚡ {bp:,} BP" if bp else ""
+            lines.append(f"{medal} <@{uid}> — **{goo:,} $GOO** ({dmg} dmg){bp_str}")
 
         # Show all wave first strikers and kill shotters
         all_fs = list(state.wave_first_strikers) + ([state.first_striker] if state.first_striker else [])
