@@ -25,6 +25,7 @@ Wire into bot.py setup_hook:
 import asyncio
 import os
 import json
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -57,6 +58,24 @@ ALGO_TREASURY      = 1_000_000  # 1 ALGO treasury
 
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 60       # how often to check for new deposits
+
+# ─────────────────────────────────────────────
+# WEEKLY PRIZE POOL CONFIG
+# ─────────────────────────────────────────────
+
+WEEKLY_RAKE_PCT       = 0.20    # 20% of each pot goes to weekly prize pool
+WEEKLY_RESET_WEEKDAY  = 6       # Sunday (0=Mon … 6=Sun)
+WEEKLY_RESET_HOUR_UTC = 0       # midnight UTC = 7PM EST Sunday
+WEEKLY_RESET_MINUTE   = 0
+
+# Channel IDs for daily leaderboard posts — set as env vars
+def _goo_leaderboard_channel_id() -> Optional[int]:
+    val = os.environ.get("DISCORD_PVP_CHANNEL_ID", "")
+    return int(val) if val else None
+
+def _algo_leaderboard_channel_id() -> Optional[int]:
+    val = os.environ.get("DISCORD_ALGO_CHANNEL_ID", "")
+    return int(val) if val else None
 
 
 # ─────────────────────────────────────────────
@@ -250,9 +269,150 @@ def _fetch_monstr_asa_ids(wallet_address: str) -> list[str]:
         return []
 
 
-# ─────────────────────────────────────────────
-# ARC-19 IMAGE URL RESOLVER
-# ─────────────────────────────────────────────
+def _fetch_all_eligible_asa_ids(wallet_address: str) -> dict:
+    """
+    Scan wallet for all NFTs belonging to approved pvp_collections.
+    Returns dict: {collection_id_str: [asa_id, ...]}
+
+    MONSTRS: filtered via in-memory MONSTR_ASSETS (fast, no extra indexer call).
+    Partners: one indexer call per partner collection to get their ASA IDs.
+    """
+    import urllib.request, json as _json
+
+    indexer_url = os.environ["INDEXER_URL"]
+
+    # Single wallet scan
+    held_asa_ids: set = set()
+    next_token = None
+    try:
+        while True:
+            url = (
+                f"{indexer_url}/v2/accounts/{wallet_address}/assets"
+                f"?include-all=false&limit=1000"
+            )
+            if next_token:
+                url += f"&next={next_token}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = _json.loads(r.read())
+            for asset in data.get("assets", []):
+                if asset.get("amount", 0) > 0:
+                    held_asa_ids.add(str(asset["asset-id"]))
+            next_token = data.get("next-token")
+            if not next_token:
+                break
+    except Exception as e:
+        print(f"[PVP] wallet scan failed {wallet_address[:8]}...: {e}")
+        return {}
+
+    # Load approved collections from DB
+    db = _db()
+    try:
+        colls = db.table("pvp_collections").select("*").eq("active", True).execute()
+        collections = colls.data or []
+    except Exception as e:
+        print(f"[PVP] pvp_collections fetch failed: {e}")
+        return {}
+
+    result = {}
+
+    for coll in collections:
+        coll_id   = str(coll["id"])
+        is_monstr = coll["is_monstr"]
+        creator   = coll["creator_address"]
+
+        if is_monstr:
+            # Fast path — use in-memory registry, no extra indexer call
+            matched = [asa for asa in held_asa_ids if asa in MONSTR_ASSETS]
+        else:
+            # Fetch creator's ASA IDs from indexer, intersect with held
+            coll_asa_ids: set = set()
+            next_tok2 = None
+            try:
+                while True:
+                    url2 = f"{indexer_url}/v2/assets?creator={creator}&limit=1000"
+                    if next_tok2:
+                        url2 += f"&next={next_tok2}"
+                    req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req2, timeout=15) as r2:
+                        data2 = _json.loads(r2.read())
+                    for asset in data2.get("assets", []):
+                        coll_asa_ids.add(str(asset.get("index", "")))
+                    next_tok2 = data2.get("next-token")
+                    if not next_tok2:
+                        break
+            except Exception as e:
+                print(f"[PVP] collection scan failed creator={creator[:8]}...: {e}")
+                continue
+            matched = [asa for asa in held_asa_ids if asa in coll_asa_ids]
+
+        if matched:
+            result[coll_id] = matched
+
+    return result
+
+
+def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
+    """
+    Fetch ARC-19 metadata and return (name, image_url).
+    Used at partner NFT registration time — name/image stored once, not re-fetched.
+    Falls back through multiple IPFS gateways.
+    Returns (f"#{asa_id}", None) on failure.
+    """
+    import urllib.request, json as _json
+    from encounters import decode_arc19_reserve
+
+    indexer_url = os.environ["INDEXER_URL"]
+    try:
+        url = f"{indexer_url}/v2/assets/{asa_id}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0", "Accept": "application/json"
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+
+        params      = data.get("asset", {}).get("params", {})
+        asset_url   = params.get("url", "")
+        reserve     = params.get("reserve", "")
+        params_name = params.get("name", "")
+
+        metadata_cid = None
+        if "template-ipfs" in asset_url and reserve:
+            metadata_cid = decode_arc19_reserve(reserve)
+        elif asset_url.startswith("ipfs://"):
+            metadata_cid = asset_url.replace("ipfs://", "")
+
+        if not metadata_cid:
+            return params_name or f"#{asa_id}", None
+
+        metadata = None
+        for gw in ["https://ipfs.algonode.xyz/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/"]:
+            try:
+                req2 = urllib.request.Request(
+                    f"{gw}{metadata_cid}",
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+                )
+                with urllib.request.urlopen(req2, timeout=10) as r2:
+                    metadata = _json.loads(r2.read())
+                break
+            except Exception:
+                continue
+
+        if not metadata:
+            return params_name or f"#{asa_id}", None
+
+        name      = metadata.get("name") or params_name or f"#{asa_id}"
+        image_raw = metadata.get("image", "")
+        image_url = None
+        if image_raw:
+            image_cid = image_raw.replace("ipfs://", "")
+            image_url = f"https://ipfs.algonode.xyz/ipfs/{image_cid}"
+
+        return name, image_url
+
+    except Exception as e:
+        print(f"[PVP] _resolve_arc19_name_and_image failed asa={asa_id}: {e}")
+        return f"#{asa_id}", None
 
 def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
     """
@@ -399,9 +559,164 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
         return None
 
 
+def _load_stats_from_roster(db, asa_id: str, owner_id: str) -> Optional[MonstrStats]:
+    """
+    Load MonstrStats from pvp_rosters. Works for MONSTRS and partner NFTs.
+    Used by the join flow so both collections work transparently.
+    """
+    try:
+        row = db.table("pvp_rosters").select("*") \
+                .eq("asa_id", str(asa_id)).eq("user_id", owner_id).execute()
+        if not row.data:
+            return None
+        r = row.data[0]
+        return MonstrStats(
+            asa_id    = r["asa_id"],
+            name      = r["nft_name"],
+            owner_id  = owner_id,
+            attack    = r["attack"],
+            defense   = r["defense"],
+            speed     = r["speed"],
+            image_url = r.get("image_url") or None,
+        )
+    except Exception as e:
+        print(f"[PVP] load_stats_from_roster failed asa={asa_id}: {e}")
+        return None
+
+
 # ─────────────────────────────────────────────
-# BOARD HELPERS
+# WEEKLY POOL HELPERS
 # ─────────────────────────────────────────────
+
+def _current_week_start() -> datetime:
+    """
+    Return the start of the current weekly period.
+    Week starts Monday 00:00 UTC (= Sunday 7PM EST).
+    """
+    now = datetime.now(timezone.utc)
+    days_since_monday = now.weekday()  # Monday=0
+    week_start = (now - timedelta(days=days_since_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return week_start
+
+
+def _ensure_weekly_pools(db) -> None:
+    """
+    Make sure active pool rows exist for the current week.
+    Safe to call on every battle — no-ops if rows already exist.
+    """
+    week_start = _current_week_start()
+    week_end   = week_start + timedelta(days=7)
+    ws         = week_start.isoformat()
+    we         = week_end.isoformat()
+
+    for room in ("goo", "algo"):
+        try:
+            existing = db.table("pvp_weekly_pools") \
+                         .select("id") \
+                         .eq("week_start", ws) \
+                         .eq("room", room) \
+                         .eq("status", "active") \
+                         .execute()
+            if not existing.data:
+                db.table("pvp_weekly_pools").insert({
+                    "week_start": ws,
+                    "week_end":   we,
+                    "room":       room,
+                    "balance":    0,
+                    "status":     "active",
+                }).execute()
+                print(f"[PVP] Created weekly pool {room} week={ws[:10]}")
+        except Exception as e:
+            print(f"[PVP] _ensure_weekly_pools failed room={room}: {e}")
+
+
+def _add_to_weekly_pool(db, room: str, amount: int) -> None:
+    """Credit amount to the active weekly pool for room."""
+    week_start = _current_week_start().isoformat()
+    try:
+        row = db.table("pvp_weekly_pools") \
+                .select("id, balance") \
+                .eq("week_start", week_start) \
+                .eq("room", room) \
+                .eq("status", "active") \
+                .execute()
+        if not row.data:
+            return
+        new_bal = row.data[0]["balance"] + amount
+        db.table("pvp_weekly_pools") \
+          .update({"balance": new_bal}) \
+          .eq("id", row.data[0]["id"]) \
+          .execute()
+    except Exception as e:
+        print(f"[PVP] _add_to_weekly_pool failed room={room}: {e}")
+
+
+def _upsert_leaderboard(db, user_id: str, room: str, won: bool) -> None:
+    """
+    Increment wins or losses for user on the weekly leaderboard.
+    Uses a read-then-write pattern (Supabase Python client doesn't support
+    increment via RPC without a custom function).
+    """
+    week_start = _current_week_start().isoformat()
+    try:
+        row = db.table("pvp_weekly_leaderboard") \
+                .select("id, wins, losses") \
+                .eq("week_start", week_start) \
+                .eq("room", room) \
+                .eq("user_id", user_id) \
+                .execute()
+        if row.data:
+            r       = row.data[0]
+            wins    = r["wins"]   + (1 if won else 0)
+            losses  = r["losses"] + (0 if won else 1)
+            db.table("pvp_weekly_leaderboard") \
+              .update({"wins": wins, "losses": losses}) \
+              .eq("id", r["id"]) \
+              .execute()
+        else:
+            db.table("pvp_weekly_leaderboard").insert({
+                "week_start": week_start,
+                "room":       room,
+                "user_id":    user_id,
+                "wins":       1 if won else 0,
+                "losses":     0 if won else 1,
+            }).execute()
+    except Exception as e:
+        print(f"[PVP] _upsert_leaderboard failed uid={user_id} room={room}: {e}")
+
+
+def _get_leaderboard(db, room: str) -> list[dict]:
+    """Return top 10 leaderboard rows for current week, sorted by wins desc."""
+    week_start = _current_week_start().isoformat()
+    try:
+        rows = db.table("pvp_weekly_leaderboard") \
+                 .select("user_id, wins, losses") \
+                 .eq("week_start", week_start) \
+                 .eq("room", room) \
+                 .order("wins", desc=True) \
+                 .limit(10) \
+                 .execute()
+        return rows.data or []
+    except Exception as e:
+        print(f"[PVP] _get_leaderboard failed room={room}: {e}")
+        return []
+
+
+def _get_pool_balance(db, room: str) -> int:
+    """Return current active pool balance for room."""
+    week_start = _current_week_start().isoformat()
+    try:
+        row = db.table("pvp_weekly_pools") \
+                .select("balance") \
+                .eq("week_start", week_start) \
+                .eq("room", room) \
+                .eq("status", "active") \
+                .execute()
+        return row.data[0]["balance"] if row.data else 0
+    except Exception:
+        return 0
 
 def _to_board_player(stats: MonstrStats, username: str) -> BoardPlayer:
     """Convert MonstrStats to BoardPlayer for board rendering."""
@@ -713,77 +1028,79 @@ async def _handle_join(interaction: discord.Interaction):
             "You're already waiting for an opponent!", ephemeral=True)
         return
 
-    # Fetch their registered MONSTRs
-    rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name") \
-             .eq("owner_id", user_id).execute()
-    if not rows.data:
+    # Fetch all registered fighters from pvp_rosters (covers MONSTRS + partners)
+    roster_res = await asyncio.to_thread(
+        lambda: db.table("pvp_rosters")
+            .select("asa_id, nft_name, attack, defense, speed")
+            .eq("user_id", user_id)
+            .execute()
+    )
+    if not roster_res.data:
         await interaction.followup.send(
-            "No registered MONSTRs. Use `/pvp_register` first.", ephemeral=True)
+            "No registered fighters. Use `/pvp_register` first.", ephemeral=True)
         return
 
-    # Check cooldowns and in-use for each MONSTR — grey out unavailable ones
     now = datetime.now(timezone.utc)
-    # Fetch full stats for sorting by power (ATK+DEF+SPD)
-    full_rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name,attack,defense,speed")                   .eq("owner_id", user_id).execute()
-    stat_map = {r["asa_id"]: r for r in (full_rows.data or [])}
+    fighter_rows = []
 
-    monstr_rows = []
-    for r in rows.data:
+    for r in roster_res.data:
         asa      = r["asa_id"]
         disabled = False
         suffix   = ""
+
+        # Cooldown check
         try:
             cd = db.table("pvp_cooldowns").select("expires_at").eq("asa_id", asa).execute()
             if cd.data:
                 expires = datetime.fromisoformat(cd.data[0]["expires_at"])
                 if expires > now:
-                    mins = int((expires - now).total_seconds() / 60) + 1
+                    mins     = int((expires - now).total_seconds() / 60) + 1
                     disabled = True
-                    suffix = f" ({mins}m)"
+                    suffix   = f" ({mins}m)"
         except Exception:
             pass
+
+        # In-queue check
         if not disabled:
             for b in [_board, _board_algo]:
                 if b.challenger and b.challenger["asa_id"] == asa:
                     disabled = True
-                    suffix = " (in queue)"
+                    suffix   = " (in queue)"
                     break
-        sr = stat_map.get(asa, {})
-        power = sr.get("attack", 0) + sr.get("defense", 0) + sr.get("speed", 0)
-        monstr_rows.append({
+
+        power = r["attack"] + r["defense"] + r["speed"]
+        fighter_rows.append({
             "asa_id":      asa,
-            "monstr_name": r["monstr_name"] + suffix,
+            "monstr_name": r["nft_name"] + suffix,
             "disabled":    disabled,
             "power":       power,
         })
 
     # Sort: available first by power desc, then disabled by power desc
-    monstr_rows.sort(key=lambda r: (r["disabled"], -r["power"]))
+    fighter_rows.sort(key=lambda r: (r["disabled"], -r["power"]))
 
     async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
-        await _on_monstr_picked(pick_interaction, asa_id, user_id, db, room)
+        await _on_fighter_picked(pick_interaction, asa_id, user_id, db, room)
 
     currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
-    view = MonstrPickerView(monstr_rows, on_pick)
+    view = MonstrPickerView(fighter_rows, on_pick)
     await interaction.followup.send(
-        f"**Choose your MONSTR** ({currency} available):",
+        f"**Choose your fighter** ({currency} available):",
         view=view, ephemeral=True)
 
 
-async def _on_monstr_picked(interaction: discord.Interaction,
+async def _on_fighter_picked(interaction: discord.Interaction,
                              asa_id: str, user_id: str, db, room: str = "goo"):
-    """Called after a player picks their MONSTR."""
+    """Called after a player picks their fighter. Works for MONSTRS and partner NFTs."""
     await interaction.response.defer(ephemeral=True)
     board = _get_board(room)
 
-    # Check MONSTR registration
-    row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
+    # Verify ownership via pvp_rosters (covers all collections)
+    row = db.table("pvp_rosters").select("*") \
+            .eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
     if not row.data:
         await interaction.followup.send(
-            "That MONSTR isn't registered. Use `/pvp_register` first.", ephemeral=True)
-        return
-    if row.data[0]["owner_id"] != user_id:
-        await interaction.followup.send("That MONSTR isn't yours.", ephemeral=True)
+            "That fighter isn't registered. Use `/pvp_register` first.", ephemeral=True)
         return
 
     # Check 30-min cooldown
@@ -795,30 +1112,32 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         if expires > now:
             mins = int((expires - now).total_seconds() / 60) + 1
             await interaction.followup.send(
-                f"That MONSTR is cooling down. Ready in **{mins} min**.", ephemeral=True)
+                f"That fighter is cooling down. Ready in **{mins} min**.", ephemeral=True)
             return
 
-    # Check MONSTR not already queued (in-memory board state)
+    # Check not already queued
     for b in [_board, _board_algo]:
         if b.challenger and b.challenger["asa_id"] == str(asa_id):
             await interaction.followup.send(
-                "That MONSTR is already waiting in a battle queue!", ephemeral=True)
+                "That fighter is already waiting in a battle queue!", ephemeral=True)
             return
 
-    # Check MONSTR not already in a genuinely active duel (not expired)
+    # Check not already in an active duel
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
-        a1 = db.table("pvp_duels").select("id").eq("status", "active")                .eq("challenger_asa", str(asa_id)).gt("expires_at", now_iso).execute()
-        a2 = db.table("pvp_duels").select("id").eq("status", "active")                .eq("opponent_asa",   str(asa_id)).gt("expires_at", now_iso).execute()
-        if (a1.data or a2.data):
+        a1 = db.table("pvp_duels").select("id").eq("status", "active") \
+               .eq("challenger_asa", str(asa_id)).gt("expires_at", now_iso).execute()
+        a2 = db.table("pvp_duels").select("id").eq("status", "active") \
+               .eq("opponent_asa",   str(asa_id)).gt("expires_at", now_iso).execute()
+        if a1.data or a2.data:
             await interaction.followup.send(
-                "That MONSTR is already in an active battle!", ephemeral=True)
+                "That fighter is already in an active battle!", ephemeral=True)
             return
     except Exception as e:
         print(f"[PVP] active duel check failed: {e}")
 
-
-    stats = _load_stats(asa_id, user_id)
+    # Load stats from pvp_rosters
+    stats = _load_stats_from_roster(db, asa_id, user_id)
     if not stats:
         await interaction.followup.send("Couldn't load stats. Try again.", ephemeral=True)
         return
@@ -831,9 +1150,9 @@ async def _on_monstr_picked(interaction: discord.Interaction,
         if room == "algo":
             locked = await asyncio.to_thread(_deduct_algo, db, user_id, wager, "wager hold — waiting for opponent")
         else:
-            locked, _ = await asyncio.to_thread(_deduct, db, user_id, wager, f"wager hold — waiting for opponent")
+            locked, _ = await asyncio.to_thread(_deduct, db, user_id, wager, "wager hold — waiting for opponent")
         if not locked:
-            wager_str = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
+            wager_str   = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
             deposit_cmd = "`/pvp_deposit_algo`" if room == "algo" else "`/pvp_deposit`"
             await interaction.followup.send(
                 f"❌ Not enough funds. Need **{wager_str}** to join. Use {deposit_cmd}.",
@@ -980,6 +1299,8 @@ class PvPCog(commands.Cog):
         self.poll_deposits.start()
         self.poll_algo_deposits.start()
         self.expire_challenges.start()
+        self.daily_leaderboard_post.start()
+        self.weekly_pool_reset.start()
         # Register persistent view so it survives restarts
         self.bot.add_view(JoinBattleView())
 
@@ -987,6 +1308,8 @@ class PvPCog(commands.Cog):
         self.poll_deposits.cancel()
         self.poll_algo_deposits.cancel()
         self.expire_challenges.cancel()
+        self.daily_leaderboard_post.cancel()
+        self.weekly_pool_reset.cancel()
 
     def _wake_deposit_poller(self, minutes: int = 10):
         """Activate deposit polling for the next N minutes."""
@@ -1193,7 +1516,7 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_register",
-        description="Register a MONSTR for PvP battles"
+        description="Register all your eligible NFTs for PvP battles"
     )
     async def pvp_register(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction):
@@ -1210,42 +1533,139 @@ class PvPCog(commands.Cog):
             return
 
         await interaction.followup.send(
-            "🔍 Checking your wallet for MONSTRs...", ephemeral=True
+            "🔍 Scanning your wallet for eligible NFTs...", ephemeral=True
         )
 
         try:
-            asa_ids = await asyncio.wait_for(
-                asyncio.to_thread(_fetch_monstr_asa_ids, wallet), timeout=20
+            eligible = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_all_eligible_asa_ids, wallet), timeout=30
             )
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(
+                content="❌ Wallet scan timed out. Try again in a moment."
+            )
+            return
         except Exception as e:
             await interaction.edit_original_response(
-                content="❌ Couldn't reach the chain. Try again in a moment."
+                content=f"❌ Couldn't reach the chain: {e}"
             )
             return
 
-        if not asa_ids:
+        if not eligible:
             await interaction.edit_original_response(
-                content="❌ No MONSTRs found in your linked wallet."
+                content="❌ No eligible NFTs found in your linked wallet."
             )
             return
 
-        # Build picker rows from on-chain holdings (top 5)
-        monstr_rows = [
-            {
-                "asa_id":      asa,
-                "monstr_name": MONSTR_ASSETS.get(asa, (f"MONSTR ...{asa[-4:]}",))[0]
-            }
-            for asa in asa_ids[:5]
-        ]
+        db = _db()
 
-        async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
-            await self._do_register(pick_interaction, asa_id, user_id, wallet)
+        # Load collection metadata once
+        colls_res = db.table("pvp_collections").select("*").eq("active", True).execute()
+        coll_map  = {str(c["id"]): c for c in (colls_res.data or [])}
 
-        view = MonstrPickerView(monstr_rows, on_pick)
-        await interaction.edit_original_response(
-            content="**Choose a MONSTR to register for PvP:**",
-            view=view
-        )
+        added_summary = {}  # collection_name -> [nft_name, ...]
+
+        for coll_id_str, asa_ids in eligible.items():
+            coll      = coll_map.get(coll_id_str, {})
+            is_monstr = coll.get("is_monstr", False)
+            coll_name = coll.get("collection_name", "Unknown")
+
+            for asa_id in asa_ids:
+
+                # Skip if already in pvp_rosters — preserves existing level/stats
+                existing = db.table("pvp_rosters").select("id") \
+                             .eq("user_id", user_id).eq("asa_id", asa_id).execute()
+                if existing.data:
+                    db.table("pvp_rosters").update({
+                        "verified_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("user_id", user_id).eq("asa_id", asa_id).execute()
+                    continue
+
+                # ── MONSTRS: copy from monstr_pvp_stats ──────────────────────
+                if is_monstr:
+                    nft_name = MONSTR_ASSETS.get(asa_id, (f"MONSTR #{asa_id[-4:]}",))[0]
+
+                    mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
+                    if not mps.data:
+                        # New MONSTR — seed monstr_pvp_stats first (mirrors _do_register)
+                        atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
+                        try:
+                            live_image_url = await asyncio.wait_for(
+                                asyncio.to_thread(_resolve_arc19_image_url, asa_id), timeout=20
+                            )
+                        except Exception:
+                            live_image_url = None
+                        db.table("monstr_pvp_stats").insert({
+                            "asa_id":          asa_id,
+                            "owner_id":        user_id,
+                            "monstr_name":     nft_name,
+                            "attack":          STAT_BASE + atk_b,
+                            "defense":         STAT_BASE + def_b,
+                            "speed":           STAT_BASE + spd_b,
+                            "trait_bonus_atk": atk_b,
+                            "trait_bonus_def": def_b,
+                            "trait_bonus_spd": spd_b,
+                            "image_url":       live_image_url or "",
+                        }).execute()
+                        mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
+
+                    r         = mps.data[0]
+                    attack    = r["attack"]
+                    defense   = r["defense"]
+                    speed     = r["speed"]
+                    image_url = r.get("image_url") or None
+
+                # ── PARTNER NFTs: ARC-19 name + random stats ─────────────────
+                else:
+                    try:
+                        nft_name, image_url = await asyncio.wait_for(
+                            asyncio.to_thread(_resolve_arc19_name_and_image, asa_id), timeout=20
+                        )
+                    except Exception:
+                        nft_name, image_url = f"#{asa_id}", None
+                    nft_name = nft_name or f"#{asa_id}"
+                    attack   = random.randint(8, 15)
+                    defense  = random.randint(8, 15)
+                    speed    = random.randint(8, 15)
+
+                # ── Insert into pvp_rosters ───────────────────────────────────
+                try:
+                    db.table("pvp_rosters").insert({
+                        "user_id":       user_id,
+                        "asa_id":        asa_id,
+                        "nft_name":      nft_name,
+                        "collection_id": int(coll_id_str),
+                        "image_url":     image_url,
+                        "attack":        attack,
+                        "defense":       defense,
+                        "speed":         speed,
+                        "level":         1,
+                        "xp":            0,
+                        "verified_at":   datetime.now(timezone.utc).isoformat(),
+                    }).execute()
+                    added_summary.setdefault(coll_name, []).append(nft_name)
+                    print(f"[PVP] roster seeded {nft_name} (asa={asa_id}) uid={user_id}")
+                except Exception as e:
+                    print(f"[PVP] roster insert failed asa={asa_id}: {e}")
+
+        if not added_summary:
+            await interaction.edit_original_response(
+                content=(
+                    "✅ Your roster is already up to date.\n"
+                    "Use `/pvp_roster` to see your fighters."
+                )
+            )
+            return
+
+        lines = ["✅ **Fighters added to your roster:**\n"]
+        for coll_name, names in added_summary.items():
+            lines.append(f"**{coll_name}** — {len(names)} added")
+            for name in names[:8]:
+                lines.append(f"  · {name}")
+            if len(names) > 8:
+                lines.append(f"  · ...and {len(names) - 8} more")
+        lines.append("\nUse `/pvp_roster` to see your full roster sorted by power.")
+        await interaction.edit_original_response(content="\n".join(lines))
 
     async def _do_register(self, interaction: discord.Interaction,
                             asa_id: str, user_id: str, wallet: str):
@@ -1347,47 +1767,158 @@ class PvPCog(commands.Cog):
 
     async def _show_stat_picker(self, interaction: discord.Interaction,
                                  asa_id: str, user_id: str, db, balance: int):
-        """Show ATK / DEF / SPD upgrade buttons for chosen MONSTR."""
+        """Show ATK / DEF / SPD upgrade buttons for chosen MONSTR.
+        Each stat gets two buttons: +1 (single step) and MAX (all remaining steps).
+        """
         await interaction.response.defer(ephemeral=True)
 
         row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
         if not row.data or row.data[0]["owner_id"] != user_id:
-            await interaction.followup.send("❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first, then come back to upgrade.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first, then come back to upgrade.",
+                ephemeral=True)
             return
 
-        r = row.data[0]
+        r     = row.data[0]
         stats = {
             "attack":  r["attack"],
             "defense": r["defense"],
             "speed":   r["speed"],
         }
 
+        algo_bal = _get_algo_balance(db, user_id)
+
+        def _max_cost(current: int) -> int:
+            """Total microALGO to upgrade a stat from current to STAT_MAX."""
+            total = 0
+            for v in range(current, STAT_MAX):
+                total += upgrade_cost_algo(v)
+            return total
+
         view = discord.ui.View(timeout=60)
 
+        stat_lines = []
         for stat, val in stats.items():
-            capped      = not can_upgrade(val)
-            algo_cost   = upgrade_cost_algo(val)
-            cost_label  = upgrade_cost_algo_display(val)
-            label       = f"{stat.upper()} {val}→{val+1}  ({cost_label})" if not capped else f"{stat.upper()} {val} MAX"
-            enabled     = not capped  # ALGO paid on-chain, always show enabled if not maxed
-            btn = discord.ui.Button(
-                label    = label,
-                style    = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
-                disabled = not enabled,
-                custom_id= f"upgrade_{asa_id}_{stat}",
+            capped   = not can_upgrade(val)
+            one_cost = upgrade_cost_algo(val)
+            max_cost = _max_cost(val)
+            steps_left = STAT_MAX - val
+
+            # +1 button (row 0)
+            one_label = (
+                f"{stat.upper()} {val}→{val+1}  ({upgrade_cost_algo_display(val)})"
+                if not capped else f"{stat.upper()} {val} MAX"
             )
-            async def make_cb(s=stat, v=val, ac=algo_cost):
+            btn_one = discord.ui.Button(
+                label     = one_label,
+                style     = discord.ButtonStyle.success if not capped else discord.ButtonStyle.secondary,
+                disabled  = capped,
+                custom_id = f"upg1_{asa_id}_{stat}",
+                row       = list(stats.keys()).index(stat),
+            )
+            async def make_one_cb(s=stat, v=val, ac=one_cost):
                 async def cb(intr: discord.Interaction):
                     await self._do_upgrade(intr, asa_id, s, v, ac, user_id, db)
                 return cb
-            btn.callback = await make_cb()
-            view.add_item(btn)
+            btn_one.callback = await make_one_cb()
+            view.add_item(btn_one)
 
+            # MAX button (same row)
+            max_algo_str = f"{max_cost/1_000_000:g} ALGO"
+            max_label = (
+                f"MAX ({steps_left} steps · {max_algo_str})"
+                if not capped else "MAX ✓"
+            )
+            btn_max = discord.ui.Button(
+                label     = max_label,
+                style     = discord.ButtonStyle.primary if not capped else discord.ButtonStyle.secondary,
+                disabled  = capped,
+                custom_id = f"upgmax_{asa_id}_{stat}",
+                row       = list(stats.keys()).index(stat),
+            )
+            async def make_max_cb(s=stat, v=val, mc=max_cost):
+                async def cb(intr: discord.Interaction):
+                    await self._do_upgrade_max(intr, asa_id, s, v, mc, user_id, db)
+                return cb
+            btn_max.callback = await make_max_cb()
+            view.add_item(btn_max)
+
+            stat_lines.append(
+                f"**{stat.upper()}** {val}/{STAT_MAX}  "
+                f"+1: {upgrade_cost_algo_display(val)}  "
+                f"MAX: {f'{max_cost/1_000_000:g} ALGO' if not capped else '✓'}"
+            )
+
+        bal_str = f"{algo_bal/1_000_000:g} ALGO"
         await interaction.followup.send(
-            f"**{r['monstr_name']}** — choose a stat to upgrade (costs paid in ALGO)\n"
-            f"ATK {r['attack']} | DEF {r['defense']} | SPD {r['speed']}",
+            f"**{r['monstr_name']}** — upgrade stats (balance: **{bal_str}**)\n"
+            + "\n".join(stat_lines),
             view=view, ephemeral=True
         )
+
+    async def _do_upgrade_max(self, interaction: discord.Interaction,
+                               asa_id: str, stat: str, current_val: int,
+                               total_cost_micro: int, user_id: str, db):
+        """Deduct total cost and apply all upgrades to max in one shot."""
+        await interaction.response.defer(ephemeral=True)
+
+        row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
+        monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
+        steps       = STAT_MAX - current_val
+
+        if steps <= 0:
+            await interaction.followup.send(
+                f"**{stat.upper()}** is already maxed!", ephemeral=True)
+            return
+
+        algo_bal = _get_algo_balance(db, user_id)
+        if algo_bal < total_cost_micro:
+            have = algo_bal / 1_000_000
+            need = total_cost_micro / 1_000_000
+            await interaction.followup.send(
+                f"Not enough ALGO. Need **{need:g} ALGO** to max {stat.upper()}, "
+                f"you have **{have:g} ALGO**.\n"
+                f"Use `/pvp_deposit_algo` to top up.",
+                ephemeral=True)
+            return
+
+        ok = _deduct_algo(db, user_id, total_cost_micro,
+                          f"max upgrade {monstr_name} {stat} {current_val}>{STAT_MAX}")
+        if not ok:
+            await interaction.followup.send("Balance error — please try again.", ephemeral=True)
+            return
+
+        db.table("monstr_pvp_stats").update({
+            stat:         STAT_MAX,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("asa_id", str(asa_id)).execute()
+
+        # Keep pvp_rosters in sync
+        db.table("pvp_rosters").update({
+            stat:         STAT_MAX,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
+
+        new_algo_bal = _get_algo_balance(db, user_id)
+        stats        = _load_stats(asa_id, user_id)
+        cost_str     = f"{total_cost_micro/1_000_000:g} ALGO"
+
+        embed = discord.Embed(
+            title=f"🔥 {stat.upper()} maxed!",
+            description=(
+                f"**{monstr_name}** — {stat.upper()} upgraded "
+                f"{current_val} → **{STAT_MAX}** ({steps} steps)\n"
+                f"Cost: **{cost_str}**  Balance: **{new_algo_bal/1_000_000:g} ALGO**"
+            ),
+            color=0xFFD700
+        )
+        if stats:
+            for name, val in format_stats_embed_fields(stats):
+                embed.add_field(name=name, value=val, inline=False)
+        if stats and stats.image_url:
+            embed.set_thumbnail(url=stats.image_url)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"[PVP] Max upgrade: uid={user_id} {stat} {current_val}>{STAT_MAX} cost={cost_str}")
 
     async def _do_upgrade(self, interaction: discord.Interaction,
                            asa_id: str, stat: str, current_val: int,
@@ -1422,6 +1953,12 @@ class PvPCog(commands.Cog):
             stat:         new_val,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("asa_id", str(asa_id)).execute()
+
+        # Keep pvp_rosters in sync so the join flow sees the updated stat
+        db.table("pvp_rosters").update({
+            stat:         new_val,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
 
         new_algo_bal = _get_algo_balance(db, user_id)
         stats = _load_stats(asa_id, user_id)
@@ -1492,7 +2029,7 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_roster",
-        description="View all your registered MONSTRs and their stats"
+        description="View all your registered fighters and their stats"
     )
     async def pvp_roster(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction): return
@@ -1501,29 +2038,40 @@ class PvPCog(commands.Cog):
         user_id = str(interaction.user.id)
         db      = _db()
 
-        rows = db.table("monstr_pvp_stats").select("*").eq("owner_id", user_id).execute()
-        if not rows.data:
+        roster_res = db.table("pvp_rosters") \
+            .select("*, pvp_collections(collection_name)") \
+            .eq("user_id", user_id) \
+            .execute()
+        roster = roster_res.data or []
+
+        if not roster:
             await interaction.followup.send(
-                "You have no registered MONSTRs. Use `/pvp_register` to add one.",
+                "Your roster is empty. Use `/pvp_register` to scan your wallet.",
                 ephemeral=True
             )
             return
 
+        # Sort by power descending
+        roster.sort(key=lambda r: r["attack"] + r["defense"] + r["speed"], reverse=True)
+
         embed = discord.Embed(
-            title=f"Your MONSTRS Roster ({len(rows.data)} registered)",
+            title=f"⚔️ Your PvP Roster ({len(roster)} fighter{'s' if len(roster) != 1 else ''})",
             color=0x1D9E75
         )
-        for r in rows.data:
-            atk_cost = upgrade_cost_algo_display(r["attack"])
-            def_cost = upgrade_cost_algo_display(r["defense"])
-            spd_cost = upgrade_cost_algo_display(r["speed"])
+        for r in roster[:25]:
+            power     = r["attack"] + r["defense"] + r["speed"]
+            coll      = r.get("pvp_collections") or {}
+            coll_name = coll.get("collection_name", "Unknown")
+            atk_cost  = upgrade_cost_algo_display(r["attack"])
+            def_cost  = upgrade_cost_algo_display(r["defense"])
+            spd_cost  = upgrade_cost_algo_display(r["speed"])
             embed.add_field(
-                name=r["monstr_name"],
+                name=f"{r['nft_name']} · Lv{r['level']} · PWR {power}",
                 value=(
                     f"ATK `{r['attack']}` ({atk_cost}) | "
                     f"DEF `{r['defense']}` ({def_cost}) | "
                     f"SPD `{r['speed']}` ({spd_cost})\n"
-                    f"ASA: `{r['asa_id']}`"
+                    f"*{coll_name}* · ASA: `{r['asa_id']}`"
                 ),
                 inline=False
             )
@@ -1816,6 +2364,24 @@ class PvPCog(commands.Cog):
                         "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
                 except Exception as e2: print(f"[PVP] DB retry failed: {e2}")
 
+            # ── Weekly prize pool rake (20%) ──────────────────────────────
+            try:
+                wager_total = wager * 2   # both players contributed
+                rake_amount = int(wager_total * WEEKLY_RAKE_PCT)
+                _ensure_weekly_pools(db)
+                _add_to_weekly_pool(db, room, rake_amount)
+                print(f"[PVP] Weekly pool +{rake_amount} ({room}) duel#{duel_id}")
+            except Exception as e:
+                print(f"[PVP] weekly pool rake failed duel#{duel_id}: {e}")
+
+            # ── Weekly leaderboard ────────────────────────────────────────
+            loser_id = opp_id if winner_id == chal_id else chal_id
+            try:
+                _upsert_leaderboard(db, winner_id, room, won=True)
+                _upsert_leaderboard(db, loser_id,  room, won=False)
+            except Exception as e:
+                print(f"[PVP] leaderboard upsert failed duel#{duel_id}: {e}")
+
         try:
             if result.is_draw:
                 win_info = WinnerInfo(monstr_name=a.name, username="draw",
@@ -1925,6 +2491,232 @@ class PvPCog(commands.Cog):
         On-chain withdrawal is handled separately via /pvp_withdraw.
         """
         print(f"[PVP] payout credited in Supabase uid={user_id} amount={amount} duel#{duel_id}")
+
+    # ─────────────────────────────────────────
+    # /pvp_leaderboard
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="pvp_leaderboard",
+        description="Show the current weekly PvP leaderboard and prize pool"
+    )
+    async def pvp_leaderboard(self, interaction: discord.Interaction):
+        room = _channel_room(interaction.channel_id)
+        if room is None:
+            if await _wrong_channel(interaction):
+                return
+        await interaction.response.defer(ephemeral=True)
+
+        db         = _db()
+        rows       = _get_leaderboard(db, room)
+        pool_bal   = _get_pool_balance(db, room)
+        week_start = _current_week_start()
+        week_end   = week_start + timedelta(days=7)
+        now        = datetime.now(timezone.utc)
+        days_left  = (week_end - now).days
+        hours_left = int(((week_end - now).total_seconds() % 86400) / 3600)
+
+        currency   = "ALGO" if room == "algo" else "$GOO"
+        pool_str   = (
+            f"{pool_bal/1_000_000:g} ALGO" if room == "algo"
+            else f"{pool_bal:,} $GOO"
+        )
+
+        embed = discord.Embed(
+            title=f"🏆 Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena Standings",
+            description=(
+                f"**Prize Pool: {pool_str}** · "
+                f"winner in {days_left}d {hours_left}h"
+            ),
+            color=0xFFD700
+        )
+
+        if not rows:
+            embed.add_field(name="No battles yet this week", value="Be the first!", inline=False)
+        else:
+            medals = ["🥇", "🥈", "🥉"]
+            for i, r in enumerate(rows):
+                medal    = medals[i] if i < 3 else f"`{i+1}.`"
+                uid      = r["user_id"]
+                wins     = r["wins"]
+                losses   = r["losses"]
+                total    = wins + losses
+                gap      = rows[0]["wins"] - wins if i > 0 else 0
+                gap_str  = f"  *(−{gap} from 1st)*" if gap > 0 else ""
+                embed.add_field(
+                    name=f"{medal} <@{uid}>",
+                    value=f"**{wins}W** / {losses}L  ({total} battles){gap_str}",
+                    inline=False
+                )
+
+        embed.set_footer(text=f"Week resets Sunday 7PM EST · {week_end.strftime('%b %d')}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ─────────────────────────────────────────
+    # DAILY LEADERBOARD POST  (9AM UTC)
+    # ─────────────────────────────────────────
+
+    @tasks.loop(hours=24)
+    async def daily_leaderboard_post(self):
+        """Post current standings + pot to each room's channel daily at 9AM UTC."""
+        db = _db()
+
+        for room, ch_fn in [
+            ("goo",  _goo_leaderboard_channel_id),
+            ("algo", _algo_leaderboard_channel_id),
+        ]:
+            ch_id = ch_fn()
+            if not ch_id:
+                continue
+            channel = self.bot.get_channel(ch_id)
+            if not channel:
+                continue
+
+            try:
+                rows     = _get_leaderboard(db, room)
+                pool_bal = _get_pool_balance(db, room)
+                week_end = _current_week_start() + timedelta(days=7)
+                now      = datetime.now(timezone.utc)
+                days_left  = (week_end - now).days
+                hours_left = int(((week_end - now).total_seconds() % 86400) / 3600)
+
+                pool_str = (
+                    f"{pool_bal/1_000_000:g} ALGO" if room == "algo"
+                    else f"{pool_bal:,} $GOO"
+                )
+
+                lines = [
+                    f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena** · "
+                    f"**{pool_str} pot** · winner in {days_left}d {hours_left}h\n"
+                ]
+
+                if not rows:
+                    lines.append("*No battles yet this week — be the first in!*")
+                else:
+                    medals = ["🥇", "🥈", "🥉"]
+                    top3   = rows[:3]
+                    for i, r in enumerate(top3):
+                        medal   = medals[i]
+                        gap     = rows[0]["wins"] - r["wins"] if i > 0 else 0
+                        gap_str = f" (−{gap})" if gap > 0 else ""
+                        lines.append(
+                            f"{medal} <@{r['user_id']}> — "
+                            f"**{r['wins']}W** / {r['losses']}L{gap_str}"
+                        )
+                    if len(rows) > 3:
+                        lines.append(f"\n*Use `/pvp_leaderboard` to see the full top 10.*")
+
+                await channel.send("\n".join(lines))
+                print(f"[PVP] Daily leaderboard posted room={room}")
+            except Exception as e:
+                print(f"[PVP] daily_leaderboard_post failed room={room}: {e}")
+
+    @daily_leaderboard_post.before_loop
+    async def before_daily_post(self):
+        await self.bot.wait_until_ready()
+        now        = datetime.now(timezone.utc)
+        next_9am   = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= next_9am:
+            next_9am += timedelta(days=1)
+        wait = (next_9am - now).total_seconds()
+        print(f"[PVP] Daily leaderboard post scheduled in {wait/3600:.1f}h")
+        await asyncio.sleep(wait)
+
+    # ─────────────────────────────────────────
+    # WEEKLY PAYOUT + RESET  (Sunday 7PM EST = Monday 00:00 UTC)
+    # ─────────────────────────────────────────
+
+    @tasks.loop(hours=1)
+    async def weekly_pool_reset(self):
+        """
+        Checks once per hour whether it's time for the weekly reset.
+        Fires at Monday 00:00 UTC (Sunday 7PM EST).
+        Pays out winners, posts announcements, wipes leaderboard for new week.
+        """
+        now = datetime.now(timezone.utc)
+        if now.weekday() != WEEKLY_RESET_WEEKDAY % 7 or now.hour != WEEKLY_RESET_HOUR_UTC:
+            return
+        # Guard against double-firing within the same hour
+        week_start = _current_week_start()
+        db         = _db()
+
+        print(f"[PVP] Weekly reset firing week={week_start.date()}")
+
+        for room, ch_fn, credit_fn, unit_divisor in [
+            ("goo",  _goo_leaderboard_channel_id,  _credit,      1),
+            ("algo", _algo_leaderboard_channel_id, _credit_algo, 1_000_000),
+        ]:
+            ch_id = ch_fn()
+            channel = self.bot.get_channel(ch_id) if ch_id else None
+
+            try:
+                # Get pool
+                pool_row = db.table("pvp_weekly_pools") \
+                             .select("id, balance") \
+                             .eq("week_start", week_start.isoformat()) \
+                             .eq("room", room) \
+                             .eq("status", "active") \
+                             .execute()
+                if not pool_row.data or pool_row.data[0]["balance"] == 0:
+                    print(f"[PVP] Weekly reset: no active pool for {room}, skipping")
+                    continue
+
+                pool_id  = pool_row.data[0]["id"]
+                pool_bal = pool_row.data[0]["balance"]
+
+                # Get winner (most wins this week)
+                lb_rows = _get_leaderboard(db, room)
+                if not lb_rows:
+                    print(f"[PVP] Weekly reset: no leaderboard entries for {room}")
+                    continue
+
+                winner_id   = lb_rows[0]["user_id"]
+                winner_wins = lb_rows[0]["wins"]
+
+                # Credit winner
+                if room == "algo":
+                    credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
+                else:
+                    credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
+
+                # Mark pool as paid
+                db.table("pvp_weekly_pools").update({
+                    "status":    "paid",
+                    "winner_id": winner_id,
+                    "paid_at":   now.isoformat(),
+                }).eq("id", pool_id).execute()
+
+                # Format payout string
+                if room == "algo":
+                    prize_str = f"{pool_bal/1_000_000:g} ALGO"
+                else:
+                    prize_str = f"{pool_bal:,} $GOO"
+
+                print(f"[PVP] Weekly pool paid room={room} winner={winner_id} amount={prize_str}")
+
+                # Post announcement
+                if channel:
+                    await channel.send(
+                        f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena — Week Over!**\n\n"
+                        f"Congratulations <@{winner_id}>! 🎉\n"
+                        f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
+                        f"The board resets now. Good luck this week everyone! ⚔️"
+                    )
+
+            except Exception as e:
+                print(f"[PVP] Weekly reset failed room={room}: {e}")
+                if channel:
+                    try:
+                        await channel.send(
+                            f"⚠️ Weekly {room.upper()} pool payout encountered an error. "
+                            f"Admins please check logs."
+                        )
+                    except Exception:
+                        pass
+
+    @weekly_pool_reset.before_loop
+    async def before_weekly_reset(self):
+        await self.bot.wait_until_ready()
 
     async def _notify_unmatched_deposit(self, amount: int):
         """Notify channel that a deposit arrived but couldn't be auto-matched."""
