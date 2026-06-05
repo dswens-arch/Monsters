@@ -61,10 +61,22 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        gateways = [url,
-                    url.replace("dweb.link", "ipfs.io"),
-                    url.replace("dweb.link", "gateway.pinata.cloud")]
-        for u in gateways:
+        cid = None
+        for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
+                        "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
+            if url.startswith(prefix):
+                cid = url[len(prefix):]
+                break
+        if cid:
+            urls = [
+                f"https://dweb.link/ipfs/{cid}",
+                f"https://ipfs.io/ipfs/{cid}",
+                f"https://gateway.pinata.cloud/ipfs/{cid}",
+            ]
+        else:
+            urls = [url]
+
+        for u in urls:
             try:
                 req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=10) as r:
