@@ -406,20 +406,8 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
         image_url = None
         if image_raw:
             image_cid = image_raw.replace("ipfs://", "")
-            # Try gateways in order, store first working URL
-            # Fall back to dweb.link as most reliable from Railway
-            for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
-                try:
-                    test_url = f"{gw}{image_cid}"
-                    req3 = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
-                    urllib.request.urlopen(req3, timeout=8)
-                    image_url = test_url
-                    break
-                except Exception:
-                    continue
-            # If all gateways fail, store dweb.link URL anyway — better than null
-            if not image_url:
-                image_url = f"https://dweb.link/ipfs/{image_cid}"
+            # Store dweb.link URL directly — no HEAD check, Railway blocks those
+            image_url = f"https://dweb.link/ipfs/{image_cid}"
 
         return name, image_url
 
@@ -2143,34 +2131,62 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_stats",
-        description="View a MONSTR's PvP stat card"
+        description="View a fighter's PvP stat card"
     )
-    @discord.app_commands.describe(asa_id="The ASA ID of the MONSTR to inspect")
+    @discord.app_commands.describe(asa_id="The ASA ID of the fighter to inspect")
     async def pvp_stats(self, interaction: discord.Interaction, asa_id: str):
         if await _wrong_channel(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 
-        db  = _db()
-        row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
+        db = _db()
+
+        # Check pvp_rosters first (covers all collections)
+        row = db.table("pvp_rosters") \
+                .select("*, pvp_collections(collection_name, is_monstr)") \
+                .eq("asa_id", str(asa_id)).execute()
+
         if not row.data:
             await interaction.followup.send(
                 f"❌ **{asa_id}** isn't registered for PvP yet.", ephemeral=True
             )
             return
 
-        r     = row.data[0]
-        stats = _load_stats(asa_id, r["owner_id"])
+        r         = row.data[0]
+        coll      = r.get("pvp_collections") or {}
+        coll_name = coll.get("collection_name", "Unknown")
+        is_monstr = coll.get("is_monstr", False)
+        stats     = _load_stats_from_roster(db, asa_id, r["user_id"])
 
-        embed = discord.Embed(title=f"🧟 {r['monstr_name']} — PvP Stats", color=0x9b59b6)
-        embed.add_field(name="👤 Owner", value=f"<@{r['owner_id']}>", inline=False)
-        for name, val in format_stats_embed_fields(stats):
-            embed.add_field(name=name, value=val, inline=False)
-        if stats and stats.image_url:
-            embed.set_thumbnail(url=stats.image_url)
-        embed.set_footer(
-            text=f"Trait bonus: ATK+{r['trait_bonus_atk']} DEF+{r['trait_bonus_def']} SPD+{r['trait_bonus_spd']}  •  Registered {r['registered_at'][:10]}"
+        embed = discord.Embed(
+            title=f"⚔️ {r['nft_name']} — PvP Stats",
+            color=0x9b59b6
         )
+        embed.add_field(name="👤 Owner",      value=f"<@{r['user_id']}>",  inline=True)
+        embed.add_field(name="📦 Collection", value=coll_name,             inline=True)
+        embed.add_field(name="🏆 Level",      value=str(r["level"]),       inline=True)
+
+        if stats:
+            for name, val in format_stats_embed_fields(stats):
+                embed.add_field(name=name, value=val, inline=False)
+        if r.get("image_url"):
+            embed.set_thumbnail(url=r["image_url"])
+
+        # Show trait bonus footer for MONSTRS only
+        if is_monstr:
+            mps = db.table("monstr_pvp_stats").select(
+                "trait_bonus_atk, trait_bonus_def, trait_bonus_spd, registered_at"
+            ).eq("asa_id", str(asa_id)).execute()
+            if mps.data:
+                m = mps.data[0]
+                embed.set_footer(
+                    text=(
+                        f"Trait bonus: ATK+{m['trait_bonus_atk']} "
+                        f"DEF+{m['trait_bonus_def']} SPD+{m['trait_bonus_spd']}  •  "
+                        f"Registered {m['registered_at'][:10]}"
+                    )
+                )
+
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
