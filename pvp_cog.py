@@ -1565,29 +1565,34 @@ class PvPCog(commands.Cog):
 
         added_summary = {}  # collection_name -> [nft_name, ...]
 
+        # Batch-fetch all already-registered ASAs in one query
+        all_asa_ids = [asa for ids in eligible.values() for asa in ids]
+        already_res = db.table("pvp_rosters").select("asa_id") \
+                        .eq("user_id", user_id).in_("asa_id", all_asa_ids).execute()
+        already_registered = {r["asa_id"] for r in (already_res.data or [])}
+
+        # Refresh verified_at for existing rows in one update per collection
+        if already_registered:
+            db.table("pvp_rosters").update({
+                "verified_at": datetime.now(timezone.utc).isoformat()
+            }).eq("user_id", user_id).in_("asa_id", list(already_registered)).execute()
+
         for coll_id_str, asa_ids in eligible.items():
             coll      = coll_map.get(coll_id_str, {})
             is_monstr = coll.get("is_monstr", False)
             coll_name = coll.get("collection_name", "Unknown")
 
-            for asa_id in asa_ids:
+            # Only process NFTs not already in roster
+            new_asa_ids = [a for a in asa_ids if a not in already_registered]
+            if not new_asa_ids:
+                continue
 
-                # Skip if already in pvp_rosters — preserves existing level/stats
-                existing = db.table("pvp_rosters").select("id") \
-                             .eq("user_id", user_id).eq("asa_id", asa_id).execute()
-                if existing.data:
-                    db.table("pvp_rosters").update({
-                        "verified_at": datetime.now(timezone.utc).isoformat()
-                    }).eq("user_id", user_id).eq("asa_id", asa_id).execute()
-                    continue
-
-                # ── MONSTRS: copy from monstr_pvp_stats ──────────────────────
-                if is_monstr:
+            if is_monstr:
+                # ── MONSTRS: sequential (fast, uses in-memory registry) ───────
+                for asa_id in new_asa_ids:
                     nft_name = MONSTR_ASSETS.get(asa_id, (f"MONSTR #{asa_id[-4:]}",))[0]
-
                     mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
                     if not mps.data:
-                        # New MONSTR — seed monstr_pvp_stats first (mirrors _do_register)
                         atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
                         try:
                             live_image_url = await asyncio.wait_for(
@@ -1610,43 +1615,73 @@ class PvPCog(commands.Cog):
                         mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
 
                     r         = mps.data[0]
-                    attack    = r["attack"]
-                    defense   = r["defense"]
-                    speed     = r["speed"]
-                    image_url = r.get("image_url") or None
-
-                # ── PARTNER NFTs: ARC-19 name + random stats ─────────────────
-                else:
                     try:
-                        nft_name, image_url = await asyncio.wait_for(
-                            asyncio.to_thread(_resolve_arc19_name_and_image, asa_id), timeout=20
+                        db.table("pvp_rosters").insert({
+                            "user_id":       user_id,
+                            "asa_id":        asa_id,
+                            "nft_name":      nft_name,
+                            "collection_id": int(coll_id_str),
+                            "image_url":     r.get("image_url") or None,
+                            "attack":        r["attack"],
+                            "defense":       r["defense"],
+                            "speed":         r["speed"],
+                            "level":         1,
+                            "xp":            0,
+                            "verified_at":   datetime.now(timezone.utc).isoformat(),
+                        }).execute()
+                        added_summary.setdefault(coll_name, []).append(nft_name)
+                        print(f"[PVP] roster seeded {nft_name} (asa={asa_id}) uid={user_id}")
+                    except Exception as e:
+                        print(f"[PVP] roster insert failed asa={asa_id}: {e}")
+
+            else:
+                # ── PARTNER NFTs: parallel ARC-19 fetch for all at once ───────
+                await interaction.edit_original_response(
+                    content=f"🔍 Fetching {len(new_asa_ids)} {coll_name} NFTs in parallel..."
+                )
+
+                async def _fetch_one(asa_id: str):
+                    try:
+                        return asa_id, await asyncio.wait_for(
+                            asyncio.to_thread(_resolve_arc19_name_and_image, asa_id),
+                            timeout=25
                         )
                     except Exception:
-                        nft_name, image_url = f"#{asa_id}", None
-                    nft_name = nft_name or f"#{asa_id}"
-                    attack   = random.randint(8, 15)
-                    defense  = random.randint(8, 15)
-                    speed    = random.randint(8, 15)
+                        return asa_id, (f"#{asa_id}", None)
 
-                # ── Insert into pvp_rosters ───────────────────────────────────
-                try:
-                    db.table("pvp_rosters").insert({
+                results = await asyncio.gather(*[_fetch_one(a) for a in new_asa_ids])
+
+                # Batch insert all partner NFTs
+                rows_to_insert = []
+                for asa_id, (nft_name, image_url) in results:
+                    nft_name = nft_name or f"#{asa_id}"
+                    rows_to_insert.append({
                         "user_id":       user_id,
                         "asa_id":        asa_id,
                         "nft_name":      nft_name,
                         "collection_id": int(coll_id_str),
                         "image_url":     image_url,
-                        "attack":        attack,
-                        "defense":       defense,
-                        "speed":         speed,
+                        "attack":        random.randint(8, 15),
+                        "defense":       random.randint(8, 15),
+                        "speed":         random.randint(8, 15),
                         "level":         1,
                         "xp":            0,
                         "verified_at":   datetime.now(timezone.utc).isoformat(),
-                    }).execute()
+                    })
                     added_summary.setdefault(coll_name, []).append(nft_name)
-                    print(f"[PVP] roster seeded {nft_name} (asa={asa_id}) uid={user_id}")
+
+                try:
+                    db.table("pvp_rosters").insert(rows_to_insert).execute()
+                    for row in rows_to_insert:
+                        print(f"[PVP] roster seeded {row['nft_name']} (asa={row['asa_id']}) uid={user_id}")
                 except Exception as e:
-                    print(f"[PVP] roster insert failed asa={asa_id}: {e}")
+                    print(f"[PVP] batch insert failed coll={coll_name}: {e}")
+                    # Fall back to individual inserts
+                    for row in rows_to_insert:
+                        try:
+                            db.table("pvp_rosters").insert(row).execute()
+                        except Exception as e2:
+                            print(f"[PVP] individual insert failed asa={row['asa_id']}: {e2}")
 
         if not added_summary:
             await interaction.edit_original_response(
