@@ -386,7 +386,7 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
             return params_name or f"#{asa_id}", None
 
         metadata = None
-        for gw in ["https://ipfs.algonode.xyz/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/"]:
+        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
             try:
                 req2 = urllib.request.Request(
                     f"{gw}{metadata_cid}",
@@ -406,7 +406,20 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
         image_url = None
         if image_raw:
             image_cid = image_raw.replace("ipfs://", "")
-            image_url = f"https://ipfs.algonode.xyz/ipfs/{image_cid}"
+            # Try gateways in order, store first working URL
+            # Fall back to dweb.link as most reliable from Railway
+            for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
+                try:
+                    test_url = f"{gw}{image_cid}"
+                    req3 = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
+                    urllib.request.urlopen(req3, timeout=8)
+                    image_url = test_url
+                    break
+                except Exception:
+                    continue
+            # If all gateways fail, store dweb.link URL anyway — better than null
+            if not image_url:
+                image_url = f"https://dweb.link/ipfs/{image_cid}"
 
         return name, image_url
 
@@ -1780,23 +1793,26 @@ class PvPCog(commands.Cog):
         db      = _db()
         balance = _get_balance(db, user_id)
 
-        # Fetch their registered MONSTRs
-        rows = db.table("monstr_pvp_stats").select("asa_id,monstr_name,attack,defense,speed") \
-                 .eq("owner_id", user_id).execute()
+        # Fetch all registered fighters from pvp_rosters (covers MONSTRS + partners)
+        rows = db.table("pvp_rosters") \
+                 .select("asa_id, nft_name, attack, defense, speed, pvp_collections(collection_name)") \
+                 .eq("user_id", user_id) \
+                 .order("attack", desc=True) \
+                 .execute()
         if not rows.data:
             await interaction.followup.send(
-                "❌ You haven't registered any MONSTRs for PvP yet.\n\nUse `/pvp_register` to register one first, then `/pvp_upgrade` to level it up.", ephemeral=True
+                "❌ No registered fighters. Use `/pvp_register` first.", ephemeral=True
             )
             return
 
-        # Show MONSTR picker
+        # Show fighter picker sorted by power
         async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
             await self._show_stat_picker(pick_interaction, asa_id, user_id, db, balance)
 
-        monstr_rows = [{"asa_id": r["asa_id"], "monstr_name": r["monstr_name"]} for r in rows.data]
-        view = MonstrPickerView(monstr_rows, on_pick)
+        fighter_rows = [{"asa_id": r["asa_id"], "monstr_name": r["nft_name"]} for r in rows.data]
+        view = MonstrPickerView(fighter_rows, on_pick)
         await interaction.followup.send(
-            f"**Choose a MONSTR to upgrade** (upgrades cost ALGO):",
+            "**Choose a fighter to upgrade** (upgrades cost ALGO):",
             view=view, ephemeral=True
         )
 
@@ -1807,14 +1823,16 @@ class PvPCog(commands.Cog):
         """
         await interaction.response.defer(ephemeral=True)
 
-        row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
-        if not row.data or row.data[0]["owner_id"] != user_id:
+        row = db.table("pvp_rosters").select("*, pvp_collections(is_monstr)") \
+                .eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
+        if not row.data:
             await interaction.followup.send(
-                "❌ That MONSTR isn't registered for PvP yet. Use `/pvp_register` first, then come back to upgrade.",
+                "❌ That fighter isn't in your roster. Use `/pvp_register` first.",
                 ephemeral=True)
             return
 
-        r     = row.data[0]
+        r         = row.data[0]
+        is_monstr = (r.get("pvp_collections") or {}).get("is_monstr", False)
         stats = {
             "attack":  r["attack"],
             "defense": r["defense"],
@@ -1886,7 +1904,7 @@ class PvPCog(commands.Cog):
 
         bal_str = f"{algo_bal/1_000_000:g} ALGO"
         await interaction.followup.send(
-            f"**{r['monstr_name']}** — upgrade stats (balance: **{bal_str}**)\n"
+            f"**{r['nft_name']}** — upgrade stats (balance: **{bal_str}**)\n"
             + "\n".join(stat_lines),
             view=view, ephemeral=True
         )
@@ -1897,8 +1915,10 @@ class PvPCog(commands.Cog):
         """Deduct total cost and apply all upgrades to max in one shot."""
         await interaction.response.defer(ephemeral=True)
 
-        row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
-        monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
+        row = db.table("pvp_rosters").select("nft_name, pvp_collections(is_monstr)") \
+                .eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
+        monstr_name = row.data[0]["nft_name"] if row.data else asa_id
+        is_monstr   = (row.data[0].get("pvp_collections") or {}).get("is_monstr", False) if row.data else False
         steps       = STAT_MAX - current_val
 
         if steps <= 0:
@@ -1923,19 +1943,21 @@ class PvPCog(commands.Cog):
             await interaction.followup.send("Balance error — please try again.", ephemeral=True)
             return
 
-        db.table("monstr_pvp_stats").update({
-            stat:         STAT_MAX,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("asa_id", str(asa_id)).execute()
-
-        # Keep pvp_rosters in sync
+        # Always update pvp_rosters
         db.table("pvp_rosters").update({
             stat:         STAT_MAX,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
 
+        # Also sync monstr_pvp_stats for MONSTRS
+        if is_monstr:
+            db.table("monstr_pvp_stats").update({
+                stat:         STAT_MAX,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("asa_id", str(asa_id)).execute()
+
         new_algo_bal = _get_algo_balance(db, user_id)
-        stats        = _load_stats(asa_id, user_id)
+        stats        = _load_stats_from_roster(db, asa_id, user_id)
         cost_str     = f"{total_cost_micro/1_000_000:g} ALGO"
 
         embed = discord.Embed(
@@ -1961,8 +1983,10 @@ class PvPCog(commands.Cog):
         """Deduct from custodial ALGO balance and apply upgrade instantly."""
         await interaction.response.defer(ephemeral=True)
 
-        row = db.table("monstr_pvp_stats").select("monstr_name").eq("asa_id", str(asa_id)).execute()
-        monstr_name = row.data[0]["monstr_name"] if row.data else asa_id
+        row = db.table("pvp_rosters").select("nft_name, pvp_collections(is_monstr)") \
+                .eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
+        monstr_name = row.data[0]["nft_name"] if row.data else asa_id
+        is_monstr   = (row.data[0].get("pvp_collections") or {}).get("is_monstr", False) if row.data else False
         algo_display = upgrade_cost_algo_display(current_val)
         new_val = current_val + 1
 
@@ -1984,24 +2008,26 @@ class PvPCog(commands.Cog):
             await interaction.followup.send("Balance error — please try again.", ephemeral=True)
             return
 
-        db.table("monstr_pvp_stats").update({
-            stat:         new_val,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("asa_id", str(asa_id)).execute()
-
-        # Keep pvp_rosters in sync so the join flow sees the updated stat
+        # Always update pvp_rosters
         db.table("pvp_rosters").update({
             stat:         new_val,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("asa_id", str(asa_id)).eq("user_id", user_id).execute()
 
+        # Also sync monstr_pvp_stats for MONSTRS
+        if is_monstr:
+            db.table("monstr_pvp_stats").update({
+                stat:         new_val,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("asa_id", str(asa_id)).execute()
+
         new_algo_bal = _get_algo_balance(db, user_id)
-        stats = _load_stats(asa_id, user_id)
+        stats = _load_stats_from_roster(db, asa_id, user_id)
 
         embed = discord.Embed(
-            title=f"MONSTR upgraded!",
+            title=f"⬆️ {monstr_name} upgraded!",
             description=(
-                f"**{stat.capitalize()}** {current_val} to **{new_val}**\n"
+                f"**{stat.capitalize()}** {current_val} → **{new_val}**\n"
                 f"Cost: **{algo_display}**  Balance: **{new_algo_bal/1_000_000:g} ALGO**"
             ),
             color=0x1D9E75
