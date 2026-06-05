@@ -81,12 +81,22 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        # Try multiple gateways
-        urls = [
-            url,
-            url.replace("dweb.link", "ipfs.io"),
-            url.replace("dweb.link", "gateway.pinata.cloud"),
-        ]
+        # Normalize to CID so we can try gateways in order
+        cid = None
+        for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
+                        "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
+            if url.startswith(prefix):
+                cid = url[len(prefix):]
+                break
+        if cid:
+            urls = [
+                f"https://dweb.link/ipfs/{cid}",
+                f"https://ipfs.io/ipfs/{cid}",
+                f"https://gateway.pinata.cloud/ipfs/{cid}",
+            ]
+        else:
+            urls = [url]
+
         data = None
         for u in urls:
             try:
