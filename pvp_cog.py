@@ -732,6 +732,19 @@ def _to_board_player(stats: MonstrStats, username: str) -> BoardPlayer:
     )
 
 
+def _to_board_player_hidden(stats: MonstrStats, username: str) -> BoardPlayer:
+    """BoardPlayer with stats hidden — used during waiting state before opponent locks in."""
+    return BoardPlayer(
+        monstr_name = stats.name,
+        username    = username,
+        attack      = 0,
+        defense     = 0,
+        speed       = 0,
+        hp          = stats.hp,
+        image_url   = stats.image_url,
+    )
+
+
 async def _get_display_name(guild, user_id: str) -> str:
     """Get a user display name from guild, fallback to user_id."""
     try:
@@ -1172,7 +1185,7 @@ async def _on_fighter_picked(interaction: discord.Interaction,
         await interaction.followup.send(
             f"**{stats.name}** is in the arena! **{wager_str}** held. Waiting for an opponent...",
             ephemeral=True)
-        bp1 = _to_board_player(stats, username)
+        bp1 = _to_board_player_hidden(stats, username)
         await _update_board(interaction.channel, "waiting", room, p1=bp1,
                             status_text="Waiting for opponent...")
     else:
