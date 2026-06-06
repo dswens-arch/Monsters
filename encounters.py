@@ -3123,6 +3123,9 @@ class EncountersCog(commands.Cog):
             else:
                 print(f"[SCHEDULER] 1 encounter already ran today — skipping AM, scheduling PM only.")
                 self._schedule_slot("pm", now)
+                # Also pre-schedule tomorrow's AM so it's ready after tonight's PM fires
+                tomorrow = now + timedelta(days=1)
+                self._schedule_slot("am", tomorrow)
             return
 
         # No encounters yet today.
@@ -3130,6 +3133,9 @@ class EncountersCog(commands.Cog):
         if now.hour >= 14:
             print(f"[SCHEDULER] No encounters yet today but AM window has passed — scheduling PM only.")
             self._schedule_slot("pm", now)
+            # Pre-schedule tomorrow's AM so it's ready after tonight's PM fires
+            tomorrow = now + timedelta(days=1)
+            self._schedule_slot("am", tomorrow)
         else:
             print(f"[SCHEDULER] No encounters yet today — scheduling both slots.")
             self._schedule_slot("am", now)
