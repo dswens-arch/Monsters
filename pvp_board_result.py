@@ -68,11 +68,18 @@ def _fetch(url, size):
                 cid = url[len(prefix):]
                 break
         if cid:
-            urls = [
-                f"https://dweb.link/ipfs/{cid}",
-                f"https://ipfs.io/ipfs/{cid}",
-                f"https://gateway.pinata.cloud/ipfs/{cid}",
-            ]
+            if cid.startswith("bafk"):
+                urls = [
+                    f"https://ipfs.io/ipfs/{cid}",
+                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://gateway.pinata.cloud/ipfs/{cid}",
+                ]
+            else:
+                urls = [
+                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://ipfs.io/ipfs/{cid}",
+                    f"https://gateway.pinata.cloud/ipfs/{cid}",
+                ]
         else:
             urls = [url]
 
