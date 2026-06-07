@@ -89,11 +89,19 @@ def _fetch(url, size):
                 cid = url[len(prefix):]
                 break
         if cid:
-            urls = [
-                f"https://dweb.link/ipfs/{cid}",
-                f"https://ipfs.io/ipfs/{cid}",
-                f"https://gateway.pinata.cloud/ipfs/{cid}",
-            ]
+            # CIDv1 (bafk...) works better on ipfs.io; CIDv0 (Qm...) works on dweb.link
+            if cid.startswith("bafk"):
+                urls = [
+                    f"https://ipfs.io/ipfs/{cid}",
+                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://gateway.pinata.cloud/ipfs/{cid}",
+                ]
+            else:
+                urls = [
+                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://ipfs.io/ipfs/{cid}",
+                    f"https://gateway.pinata.cloud/ipfs/{cid}",
+                ]
         else:
             urls = [url]
 
