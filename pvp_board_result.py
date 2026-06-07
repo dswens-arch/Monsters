@@ -70,15 +70,15 @@ def _fetch(url, size):
         if cid:
             if cid.startswith("bafk"):
                 urls = [
-                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://ipfs.io/ipfs/{cid}",
+                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://dweb.link/ipfs/{cid}",
                 ]
             else:
                 urls = [
                     f"https://dweb.link/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://ipfs.io/ipfs/{cid}",
+                    f"https://nftstorage.link/ipfs/{cid}",
                 ]
         else:
             urls = [url]
