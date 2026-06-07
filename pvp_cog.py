@@ -40,6 +40,22 @@ from pvp_engine import (
     STAT_BASE, STAT_MAX,
 )
 from encounters import MONSTR_ASSETS, send_goo, has_opted_in
+
+# ─────────────────────────────────────────────
+# PARTNER COLLECTION IMAGE MAPS
+# Pre-loaded from CSV — no IPFS calls at registration time.
+# Add new collections here as {asa_id_str: image_url}
+# ─────────────────────────────────────────────
+
+try:
+    from zappies_image_map import ZAPPIES_IMAGE_MAP
+except ImportError:
+    ZAPPIES_IMAGE_MAP = {}
+
+# Map collection_id -> image lookup dict
+COLLECTION_IMAGE_MAPS: dict[int, dict] = {
+    2: ZAPPIES_IMAGE_MAP,  # Zappies Reborn
+}
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
 
@@ -885,34 +901,88 @@ def _get_board(room: str) -> BoardState:
 # MONSTR PICKER VIEW  (ephemeral — only sender sees)
 # ─────────────────────────────────────────────
 
-class MonstrPickerView(discord.ui.View):
+# ─────────────────────────────────────────────
+# COLLECTION PICKER VIEW
+# ─────────────────────────────────────────────
+
+class CollectionPickerView(discord.ui.View):
     """
-    Shows up to 5 MONSTRs per page with prev/next navigation.
-    Fires join_callback(interaction, asa_id) when a choice is made.
+    Step 1: show one button per collection the player holds fighters in.
+    Tapping a collection opens FighterPickerView for that collection.
+    Skipped entirely if player only has one collection.
     """
-    def __init__(self, monstr_rows: list[dict], join_callback, page: int = 0):
+    def __init__(self, collections: list[dict], all_fighters: list[dict],
+                 join_callback, prompt: str = "Choose your fighter"):
         super().__init__(timeout=120)
-        self._all_rows = monstr_rows
+        self._all_fighters = all_fighters
+        self._cb           = join_callback
+        self._prompt       = prompt
+
+        for coll in collections:
+            btn = discord.ui.Button(
+                label     = coll["name"],
+                style     = discord.ButtonStyle.primary,
+                custom_id = f"coll_{coll['id']}",
+            )
+            btn.callback = self._make_coll_cb(coll["id"], coll["name"])
+            self.add_item(btn)
+
+    def _make_coll_cb(self, coll_id: int, coll_name: str):
+        async def cb(interaction: discord.Interaction):
+            fighters = [f for f in self._all_fighters if f["collection_id"] == coll_id]
+            view = FighterPickerView(fighters, self._cb)
+            await interaction.response.edit_message(
+                content=f"**{coll_name}** — choose your fighter:",
+                view=view
+            )
+        return cb
+
+
+# ─────────────────────────────────────────────
+# FIGHTER PICKER VIEW  (replaces MonstrPickerView)
+# ─────────────────────────────────────────────
+
+class FighterPickerView(discord.ui.View):
+    """
+    Shows up to 5 fighters per page sorted by power, with stats on each button.
+    Format: "Zappy #1706  ⚔15 🛡14 ⚡14"
+    Includes Prev/Next pagination and Enter ASA ID button.
+    """
+    def __init__(self, fighter_rows: list[dict], join_callback, page: int = 0):
+        super().__init__(timeout=120)
+        self._all_rows = fighter_rows
         self._cb       = join_callback
         self._page     = page
         self._per_page = 5
 
-        start = page * self._per_page
-        page_rows = monstr_rows[start:start + self._per_page]
+        start     = page * self._per_page
+        page_rows = fighter_rows[start:start + self._per_page]
 
         for row in page_rows:
             disabled = row.get("disabled", False)
+            name     = row["monstr_name"]
+            atk      = row.get("attack", 0)
+            defense  = row.get("defense", 0)
+            spd      = row.get("speed", 0)
+            # Stat suffix if we have stats
+            if atk or defense or spd:
+                label = f"{name}  ⚔{atk} 🛡{defense} ⚡{spd}"
+            else:
+                label = name
+            # Truncate to Discord's 80-char button label limit
+            if len(label) > 80:
+                label = label[:77] + "..."
+
             btn = discord.ui.Button(
-                label    = row["monstr_name"],
-                style    = discord.ButtonStyle.secondary if disabled else discord.ButtonStyle.primary,
-                custom_id= f"pick_{row['asa_id']}",
-                disabled = disabled,
+                label     = label,
+                style     = discord.ButtonStyle.secondary if disabled else discord.ButtonStyle.primary,
+                custom_id = f"pick_{row['asa_id']}",
+                disabled  = disabled,
             )
             btn.callback = self._make_pick_cb(row["asa_id"])
             self.add_item(btn)
 
-        # Nav row
-        total_pages = (len(monstr_rows) - 1) // self._per_page + 1
+        total_pages = max(1, (len(fighter_rows) - 1) // self._per_page + 1)
 
         if page > 0:
             prev_btn = discord.ui.Button(
@@ -943,18 +1013,18 @@ class MonstrPickerView(discord.ui.View):
         return cb
 
     async def _prev_cb(self, interaction: discord.Interaction):
-        new_view = MonstrPickerView(self._all_rows, self._cb, self._page - 1)
-        total = (len(self._all_rows) - 1) // 5 + 1
+        new_view = FighterPickerView(self._all_rows, self._cb, self._page - 1)
+        total = max(1, (len(self._all_rows) - 1) // 5 + 1)
         await interaction.response.edit_message(
-            content=f"Choose a MONSTR (page {self._page}/{total}):",
+            content=f"Choose your fighter (page {self._page}/{total}):",
             view=new_view
         )
 
     async def _next_cb(self, interaction: discord.Interaction):
-        new_view = MonstrPickerView(self._all_rows, self._cb, self._page + 1)
-        total = (len(self._all_rows) - 1) // 5 + 1
+        new_view = FighterPickerView(self._all_rows, self._cb, self._page + 1)
+        total = max(1, (len(self._all_rows) - 1) // 5 + 1)
         await interaction.response.edit_message(
-            content=f"Choose a MONSTR (page {self._page + 2}/{total}):",
+            content=f"Choose your fighter (page {self._page + 2}/{total}):",
             view=new_view
         )
 
@@ -962,7 +1032,11 @@ class MonstrPickerView(discord.ui.View):
         await interaction.response.send_modal(ASAModal(self._cb))
 
 
-class ASAModal(discord.ui.Modal, title="Enter your MONSTR ASA ID"):
+# Keep MonstrPickerView as alias for any legacy references
+MonstrPickerView = FighterPickerView
+
+
+class ASAModal(discord.ui.Modal, title="Enter your Fighter ASA ID"):
     asa_id = discord.ui.TextInput(
         label       = "ASA ID",
         placeholder = "e.g. 1234567890",
@@ -976,6 +1050,34 @@ class ASAModal(discord.ui.Modal, title="Enter your MONSTR ASA ID"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await self._cb(interaction, self.asa_id.value.strip())
+
+
+def _build_collection_picker(fighter_rows: list[dict], join_callback,
+                              prompt: str = "Choose your fighter"):
+    """
+    Build either a CollectionPickerView (multiple collections) or
+    FighterPickerView (single collection) depending on what the player holds.
+    Returns (view, message_content).
+    """
+    # Group by collection
+    coll_ids_seen = []
+    coll_map = {}
+    for f in fighter_rows:
+        cid = f.get("collection_id")
+        cname = f.get("collection_name", "Unknown")
+        if cid not in coll_map:
+            coll_map[cid] = cname
+            coll_ids_seen.append(cid)
+
+    if len(coll_ids_seen) <= 1:
+        # Single collection — skip straight to fighter picker
+        return FighterPickerView(fighter_rows, join_callback), f"**{prompt}:**"
+    else:
+        collections = [{"id": cid, "name": coll_map[cid]} for cid in coll_ids_seen]
+        return CollectionPickerView(collections, fighter_rows, join_callback, prompt), \
+               f"**{prompt}** — choose your collection first:"
+
+
 
 
 # ─────────────────────────────────────────────
@@ -1045,7 +1147,7 @@ async def _handle_join(interaction: discord.Interaction):
     # Fetch all registered fighters from pvp_rosters (covers MONSTRS + partners)
     roster_res = await asyncio.to_thread(
         lambda: db.table("pvp_rosters")
-            .select("asa_id, nft_name, attack, defense, speed")
+            .select("asa_id, nft_name, attack, defense, speed, collection_id, pvp_collections(collection_name)")
             .eq("user_id", user_id)
             .execute()
     )
@@ -1082,12 +1184,18 @@ async def _handle_join(interaction: discord.Interaction):
                     suffix   = " (in queue)"
                     break
 
-        power = r["attack"] + r["defense"] + r["speed"]
+        coll     = r.get("pvp_collections") or {}
+        power    = r["attack"] + r["defense"] + r["speed"]
         fighter_rows.append({
-            "asa_id":      asa,
-            "monstr_name": r["nft_name"] + suffix,
-            "disabled":    disabled,
-            "power":       power,
+            "asa_id":         asa,
+            "monstr_name":    r["nft_name"] + suffix,
+            "attack":         r["attack"],
+            "defense":        r["defense"],
+            "speed":          r["speed"],
+            "disabled":       disabled,
+            "power":          power,
+            "collection_id":  r["collection_id"],
+            "collection_name": coll.get("collection_name", "Unknown"),
         })
 
     # Sort: available first by power desc, then disabled by power desc
@@ -1097,9 +1205,9 @@ async def _handle_join(interaction: discord.Interaction):
         await _on_fighter_picked(pick_interaction, asa_id, user_id, db, room)
 
     currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
-    view = MonstrPickerView(fighter_rows, on_pick)
+    view, content = _build_collection_picker(fighter_rows, on_pick, "Choose your fighter")
     await interaction.followup.send(
-        f"**Choose your fighter** ({currency} available):",
+        f"{content}\n({currency} available)",
         view=view, ephemeral=True)
 
 
@@ -1649,26 +1757,29 @@ class PvPCog(commands.Cog):
                         print(f"[PVP] roster insert failed asa={asa_id}: {e}")
 
             else:
-                # ── PARTNER NFTs: parallel ARC-19 fetch for all at once ───────
+                # ── PARTNER NFTs: image from pre-loaded map, name from ARC-19 ──
+                coll_image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id_str), {})
+
                 await interaction.edit_original_response(
-                    content=f"🔍 Fetching {len(new_asa_ids)} {coll_name} NFTs in parallel..."
+                    content=f"🔍 Registering {len(new_asa_ids)} {coll_name} NFTs..."
                 )
 
-                async def _fetch_one(asa_id: str):
+                async def _fetch_name(asa_id: str):
                     try:
-                        return asa_id, await asyncio.wait_for(
+                        name, _ = await asyncio.wait_for(
                             asyncio.to_thread(_resolve_arc19_name_and_image, asa_id),
-                            timeout=25
+                            timeout=15
                         )
+                        return asa_id, name or f"#{asa_id}"
                     except Exception:
-                        return asa_id, (f"#{asa_id}", None)
+                        return asa_id, f"#{asa_id}"
 
-                results = await asyncio.gather(*[_fetch_one(a) for a in new_asa_ids])
+                name_results = await asyncio.gather(*[_fetch_name(a) for a in new_asa_ids])
 
                 # Batch insert all partner NFTs
                 rows_to_insert = []
-                for asa_id, (nft_name, image_url) in results:
-                    nft_name = nft_name or f"#{asa_id}"
+                for asa_id, nft_name in name_results:
+                    image_url = coll_image_map.get(asa_id)
                     rows_to_insert.append({
                         "user_id":       user_id,
                         "asa_id":        asa_id,
@@ -1687,10 +1798,9 @@ class PvPCog(commands.Cog):
                 try:
                     db.table("pvp_rosters").insert(rows_to_insert).execute()
                     for row in rows_to_insert:
-                        print(f"[PVP] roster seeded {row['nft_name']} (asa={row['asa_id']}) uid={user_id}")
+                        print(f"[PVP] roster seeded {row['nft_name']} (asa={row['asa_id']}) img={'yes' if row['image_url'] else 'no'} uid={user_id}")
                 except Exception as e:
                     print(f"[PVP] batch insert failed coll={coll_name}: {e}")
-                    # Fall back to individual inserts
                     for row in rows_to_insert:
                         try:
                             db.table("pvp_rosters").insert(row).execute()
@@ -1794,11 +1904,10 @@ class PvPCog(commands.Cog):
         db      = _db()
         balance = _get_balance(db, user_id)
 
-        # Fetch all registered fighters from pvp_rosters (covers MONSTRS + partners)
+        # Fetch all registered fighters from pvp_rosters
         rows = db.table("pvp_rosters") \
-                 .select("asa_id, nft_name, attack, defense, speed, pvp_collections(collection_name)") \
+                 .select("asa_id, nft_name, attack, defense, speed, collection_id, pvp_collections(collection_name)") \
                  .eq("user_id", user_id) \
-                 .order("attack", desc=True) \
                  .execute()
         if not rows.data:
             await interaction.followup.send(
@@ -1806,14 +1915,28 @@ class PvPCog(commands.Cog):
             )
             return
 
-        # Show fighter picker sorted by power
         async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
             await self._show_stat_picker(pick_interaction, asa_id, user_id, db, balance)
 
-        fighter_rows = [{"asa_id": r["asa_id"], "monstr_name": r["nft_name"]} for r in rows.data]
-        view = MonstrPickerView(fighter_rows, on_pick)
+        fighter_rows = []
+        for r in rows.data:
+            coll = r.get("pvp_collections") or {}
+            power = r["attack"] + r["defense"] + r["speed"]
+            fighter_rows.append({
+                "asa_id":          r["asa_id"],
+                "monstr_name":     r["nft_name"],
+                "attack":          r["attack"],
+                "defense":         r["defense"],
+                "speed":           r["speed"],
+                "power":           power,
+                "collection_id":   r["collection_id"],
+                "collection_name": coll.get("collection_name", "Unknown"),
+            })
+        fighter_rows.sort(key=lambda r: -r["power"])
+
+        view, content = _build_collection_picker(fighter_rows, on_pick, "Choose a fighter to upgrade")
         await interaction.followup.send(
-            "**Choose a fighter to upgrade** (upgrades cost ALGO):",
+            f"{content}\n(upgrades cost ALGO)",
             view=view, ephemeral=True
         )
 
