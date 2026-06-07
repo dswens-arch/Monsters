@@ -2766,6 +2766,32 @@ class PvPCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ─────────────────────────────────────────
+    # /pvp_imgtest  (temporary debug — remove after testing)
+    # ─────────────────────────────────────────
+
+    @discord.app_commands.command(name="pvp_imgtest", description="Test IPFS gateway reachability")
+    async def pvp_imgtest(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        import urllib.request as _ur
+        cid = "bafkreiair63yxr62sd3cv7lc6epjuotrswju2r5of7i44jyopgvmfghdci"
+        results = []
+        for gw in [
+            "https://ipfs.io/ipfs/",
+            "https://dweb.link/ipfs/",
+            "https://gateway.pinata.cloud/ipfs/",
+            "https://cloudflare-ipfs.com/ipfs/",
+            "https://ipfs.algonode.xyz/ipfs/",
+        ]:
+            try:
+                req = _ur.Request(f"{gw}{cid}", headers={"User-Agent": "Mozilla/5.0"})
+                with _ur.urlopen(req, timeout=10) as r:
+                    data = r.read()
+                results.append(f"✅ {gw} — {len(data):,} bytes")
+            except Exception as e:
+                results.append(f"❌ {gw} — {e}")
+        await interaction.followup.send("\n".join(results), ephemeral=True)
+
+    # ─────────────────────────────────────────
     # DAILY LEADERBOARD POST  (9AM UTC)
     # ─────────────────────────────────────────
 
