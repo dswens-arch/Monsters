@@ -2776,6 +2776,7 @@ class PvPCog(commands.Cog):
         cid = "bafkreiair63yxr62sd3cv7lc6epjuotrswju2r5of7i44jyopgvmfghdci"
         results = []
         for gw in [
+            "https://nftstorage.link/ipfs/",
             "https://ipfs.io/ipfs/",
             "https://dweb.link/ipfs/",
             "https://gateway.pinata.cloud/ipfs/",
