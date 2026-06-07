@@ -89,19 +89,19 @@ def _fetch(url, size):
                 cid = url[len(prefix):]
                 break
         if cid:
-            # CIDv1 (bafk...) — nftstorage.link handles it reliably
-            # CIDv0 (Qm...) — dweb.link works fine
+            # ipfs.io confirmed working for bafk CIDv1 on this Railway project
+            # dweb.link confirmed working for Qm CIDv0
             if cid.startswith("bafk"):
                 urls = [
-                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://ipfs.io/ipfs/{cid}",
+                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://dweb.link/ipfs/{cid}",
                 ]
             else:
                 urls = [
                     f"https://dweb.link/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
                     f"https://ipfs.io/ipfs/{cid}",
+                    f"https://nftstorage.link/ipfs/{cid}",
                 ]
         else:
             urls = [url]
