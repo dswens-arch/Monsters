@@ -61,16 +61,19 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        urls = [url]
-        for old, new in [
-            ("dweb.link", "ipfs.io"),
-            ("ipfs.io", "dweb.link"),
-            ("dweb.link", "gateway.pinata.cloud"),
-        ]:
-            if old in url:
-                urls.append(url.replace(old, new, 1))
-        seen = set()
-        urls = [u for u in urls if not (u in seen or seen.add(u))]
+        if "supabase" in url:
+            urls = [url]
+        else:
+            urls = [url]
+            for old, new in [
+                ("dweb.link", "ipfs.io"),
+                ("ipfs.io", "dweb.link"),
+                ("dweb.link", "gateway.pinata.cloud"),
+            ]:
+                if old in url:
+                    urls.append(url.replace(old, new, 1))
+            seen = set()
+            urls = [u for u in urls if not (u in seen or seen.add(u))]
 
         for u in urls:
             try:
