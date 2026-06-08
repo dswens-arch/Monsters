@@ -42,6 +42,113 @@ from pvp_engine import (
 from encounters import MONSTR_ASSETS, send_goo, has_opted_in
 
 # ─────────────────────────────────────────────
+# SUPABASE STORAGE IMAGE CACHE
+# Images are uploaded to Supabase Storage on first use.
+# Railway can always reach Supabase — no IPFS dependency at render time.
+# ─────────────────────────────────────────────
+
+_supabase_image_cache: dict[str, str] = {}  # asa_id -> supabase public URL
+IMAGE_BUCKET = "nft-images"
+
+def _get_supabase_image_url(asa_id: str, ipfs_url: str) -> Optional[str]:
+    """
+    Return a Supabase Storage URL for this image.
+    If not yet uploaded, fetch from IPFS and upload now.
+    Returns None if upload fails.
+    """
+    if not ipfs_url:
+        return None
+
+    # Check memory cache first
+    if asa_id in _supabase_image_cache:
+        return _supabase_image_cache[asa_id]
+
+    import urllib.request, io as _io
+    db = _db()
+
+    # Check if already in Supabase Storage
+    try:
+        path     = f"pvp/{asa_id}.png"
+        existing = db.storage.from_(IMAGE_BUCKET).get_public_url(path)
+        if existing:
+            # Verify it's not a 404 by checking the URL format
+            if "supabase" in existing and asa_id in existing:
+                _supabase_image_cache[asa_id] = existing
+                return existing
+    except Exception:
+        pass
+
+    # Fetch from IPFS and upload to Supabase Storage
+    gateways = []
+    cid_path  = None
+    for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
+                    "https://nftstorage.link/ipfs/"]:
+        if ipfs_url.startswith(prefix):
+            cid_path = ipfs_url[len(prefix):]
+            break
+
+    if cid_path:
+        cid_root = cid_path.split("/")[0]
+        if cid_root.startswith("baf"):
+            gateways = [
+                f"https://ipfs.io/ipfs/{cid_path}",
+                f"https://nftstorage.link/ipfs/{cid_path}",
+                f"https://dweb.link/ipfs/{cid_path}",
+            ]
+        else:
+            gateways = [
+                f"https://dweb.link/ipfs/{cid_path}",
+                f"https://ipfs.io/ipfs/{cid_path}",
+            ]
+    else:
+        gateways = [ipfs_url]
+
+    image_data = None
+    for gw_url in gateways:
+        try:
+            req = urllib.request.Request(gw_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                image_data = r.read()
+            if image_data:
+                break
+        except Exception as e:
+            print(f"[PVP IMG] fetch failed {gw_url[:50]}: {e}")
+            continue
+
+    if not image_data:
+        print(f"[PVP IMG] all gateways failed for asa={asa_id}")
+        return None
+
+    # Detect format
+    ext = "png"
+    if image_data[:3] == b'\xff\xd8\xff':
+        ext = "jpg"
+    elif image_data[:4] == b'RIFF':
+        ext = "webp"
+
+    path = f"pvp/{asa_id}.{ext}"
+    try:
+        # Ensure bucket exists
+        try:
+            db.storage.create_bucket(IMAGE_BUCKET, options={"public": True})
+        except Exception:
+            pass  # already exists
+
+        # Upload
+        db.storage.from_(IMAGE_BUCKET).upload(
+            path=path,
+            file=image_data,
+            file_options={"content-type": f"image/{ext}", "upsert": "true"},
+        )
+        public_url = db.storage.from_(IMAGE_BUCKET).get_public_url(path)
+        _supabase_image_cache[asa_id] = public_url
+        print(f"[PVP IMG] uploaded asa={asa_id} -> {public_url[:60]}")
+        return public_url
+    except Exception as e:
+        print(f"[PVP IMG] upload failed asa={asa_id}: {e}")
+        return ipfs_url  # fall back to original URL
+
+# ─────────────────────────────────────────────
 # PARTNER COLLECTION IMAGE MAPS
 # Pre-loaded from CSV — no IPFS calls at registration time.
 # Add new collections here as {asa_id_str: image_url}
@@ -598,8 +705,9 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
         row = db.table("monstr_pvp_stats").select("*").eq("asa_id", str(asa_id)).execute()
         if not row.data:
             return None
-        r   = row.data[0]
-        img = r.get("image_url") or None  # stored at registration time
+        r         = row.data[0]
+        ipfs_url  = r.get("image_url") or None
+        image_url = _get_supabase_image_url(r["asa_id"], ipfs_url) if ipfs_url else None
         return MonstrStats(
             asa_id   = r["asa_id"],
             name     = r["monstr_name"],
@@ -607,7 +715,7 @@ def _load_stats(asa_id: str, owner_id: str) -> Optional[MonstrStats]:
             attack   = r["attack"],
             defense  = r["defense"],
             speed    = r["speed"],
-            image_url= img,
+            image_url= image_url,
         )
     except Exception as e:
         print(f"[PVP] load_stats failed asa={asa_id}: {e}")
@@ -625,6 +733,8 @@ def _load_stats_from_roster(db, asa_id: str, owner_id: str) -> Optional[MonstrSt
         if not row.data:
             return None
         r = row.data[0]
+        ipfs_url  = r.get("image_url") or None
+        image_url = _get_supabase_image_url(r["asa_id"], ipfs_url) if ipfs_url else None
         return MonstrStats(
             asa_id    = r["asa_id"],
             name      = r["nft_name"],
@@ -632,7 +742,7 @@ def _load_stats_from_roster(db, asa_id: str, owner_id: str) -> Optional[MonstrSt
             attack    = r["attack"],
             defense   = r["defense"],
             speed     = r["speed"],
-            image_url = r.get("image_url") or None,
+            image_url = image_url,
         )
     except Exception as e:
         print(f"[PVP] load_stats_from_roster failed asa={asa_id}: {e}")
