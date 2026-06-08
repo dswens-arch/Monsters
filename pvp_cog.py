@@ -2586,9 +2586,10 @@ class PvPCog(commands.Cog):
             rows = (
                 db.table("pvp_rosters")
                 .select("asa_id, nft_name, pvp_collections(is_monstr)")
-                .or_("image_url.is.null,image_url.eq.")
                 .execute()
             )
+            # Filter in Python since older supabase-py doesn't support .or_()
+            rows.data = [r for r in (rows.data or []) if not r.get("image_url")]
             monstr_rows = [
                 r for r in (rows.data or [])
                 if (r.get("pvp_collections") or {}).get("is_monstr", False)
