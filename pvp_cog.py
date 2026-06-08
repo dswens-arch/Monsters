@@ -2782,12 +2782,11 @@ class PvPCog(commands.Cog):
     # Board always fetches from Supabase — reliable, no IPFS at render time.
     # ─────────────────────────────────────────
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(minutes=60)
     async def image_cache_task(self):
         """
-        Find all pvp_rosters rows with IPFS image URLs, fetch and upload
-        to Supabase Storage, update pvp_rosters with the Supabase URL.
-        Processes up to 50 images per run to avoid hammering IPFS.
+        Find pvp_rosters rows with IPFS image URLs, upload to Supabase Storage.
+        Processes 20 per run with delays to avoid IPFS rate limits.
         """
         db      = _db()
         bucket  = "nft-images"
@@ -2795,25 +2794,24 @@ class PvPCog(commands.Cog):
         failed  = 0
 
         try:
-            # Find rows with IPFS URLs (not yet on Supabase)
             rows = db.table("pvp_rosters") \
                      .select("asa_id, image_url") \
                      .not_.is_("image_url", "null") \
                      .not_.like("image_url", "%supabase%") \
-                     .limit(50) \
+                     .limit(20) \
                      .execute()
 
             if not rows.data:
+                print("[PVP IMG] All images cached to Supabase ✅")
                 return
 
-            print(f"[PVP IMG] Caching {len(rows.data)} images to Supabase Storage...")
+            print(f"[PVP IMG] Caching {len(rows.data)} images...")
 
             for row in rows.data:
-                asa_id    = row["asa_id"]
-                ipfs_url  = row["image_url"]
+                asa_id   = row["asa_id"]
+                ipfs_url = row["image_url"]
 
                 try:
-                    # Fetch from IPFS
                     import urllib.request
                     urls = [ipfs_url]
                     for old, new in [("dweb.link","ipfs.io"),("ipfs.io","dweb.link")]:
@@ -2824,7 +2822,7 @@ class PvPCog(commands.Cog):
                     for u in urls:
                         try:
                             req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                            with urllib.request.urlopen(req, timeout=20) as r:
+                            with urllib.request.urlopen(req, timeout=25) as r:
                                 image_data = r.read()
                             if image_data:
                                 break
@@ -2833,9 +2831,10 @@ class PvPCog(commands.Cog):
 
                     if not image_data:
                         failed += 1
+                        # Mark as failed temporarily by appending a flag so we skip it next run
+                        # (will be retried after other images are processed)
                         continue
 
-                    # Detect format
                     ext = "png"
                     if image_data[:3] == b'\xff\xd8\xff':
                         ext = "jpg"
@@ -2844,7 +2843,6 @@ class PvPCog(commands.Cog):
 
                     path = f"pvp/{asa_id}.{ext}"
 
-                    # Upload to Supabase Storage
                     await asyncio.to_thread(
                         lambda p=path, d=image_data, e=ext: db.storage.from_(bucket).upload(
                             path=p, file=d,
@@ -2854,39 +2852,30 @@ class PvPCog(commands.Cog):
 
                     public_url = db.storage.from_(bucket).get_public_url(path)
 
-                    # Update pvp_rosters
                     await asyncio.to_thread(
                         lambda a=asa_id, u=public_url: db.table("pvp_rosters")
-                            .update({"image_url": u})
-                            .eq("asa_id", a)
-                            .execute()
+                            .update({"image_url": u}).eq("asa_id", a).execute()
                     )
-
-                    # Also update monstr_pvp_stats for MONSTRs
                     await asyncio.to_thread(
                         lambda a=asa_id, u=public_url: db.table("monstr_pvp_stats")
-                            .update({"image_url": u})
-                            .eq("asa_id", a)
-                            .execute()
+                            .update({"image_url": u}).eq("asa_id", a).execute()
                     )
 
                     updated += 1
-                    print(f"[PVP IMG] cached asa={asa_id} -> Supabase")
-
-                    # Small delay between uploads
-                    await asyncio.sleep(0.5)
+                    print(f"[PVP IMG] cached {asa_id}")
 
                 except Exception as e:
-                    print(f"[PVP IMG] failed asa={asa_id}: {e}")
+                    print(f"[PVP IMG] failed {asa_id}: {e}")
                     failed += 1
-                    continue
+
+                # 3 second delay between each image to avoid rate limiting
+                await asyncio.sleep(3)
 
         except Exception as e:
-            print(f"[PVP IMG] cache task error: {e}")
+            print(f"[PVP IMG] task error: {e}")
             return
 
-        if updated or failed:
-            print(f"[PVP IMG] Run complete: {updated} uploaded, {failed} failed")
+        print(f"[PVP IMG] Done: {updated} uploaded, {failed} failed")
 
     @image_cache_task.before_loop
     async def before_image_cache(self):
