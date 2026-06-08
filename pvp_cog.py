@@ -2491,6 +2491,7 @@ class PvPCog(commands.Cog):
                 await interaction.followup.send(f"Could not resolve image for {display}. Check the ASA and try again.", ephemeral=True)
                 return
             db.table("monstr_pvp_stats").update({"image_url": new_url}).eq("asa_id", asa_id).execute()
+            db.table("pvp_rosters").update({"image_url": new_url}).eq("asa_id", asa_id).execute()
             await interaction.followup.send(f"Image updated for **{display}**.\n{new_url}", ephemeral=True)
         except asyncio.TimeoutError:
             await interaction.followup.send("Timed out resolving the image. Try again.", ephemeral=True)
