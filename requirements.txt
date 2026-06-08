@@ -5,3 +5,4 @@ python-dotenv==1.0.0
 py-algorand-sdk==2.5.0
 Pillow==10.3.0
 base58
+aiohttp
