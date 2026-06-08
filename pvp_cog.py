@@ -2573,6 +2573,67 @@ class PvPCog(commands.Cog):
             print(f"[ERROR] pvp_refreshimage: {e}")
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
+    @discord.app_commands.command(
+        name="pvp_backfill_images",
+        description="(Admin) Bulk re-fetch images for all MONSTR roster rows with missing image URLs"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def pvp_backfill_images(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            db = _db()
+            # Find all pvp_rosters rows with empty image_url where collection is MONSTRS
+            rows = (
+                db.table("pvp_rosters")
+                .select("asa_id, nft_name, pvp_collections(is_monstr)")
+                .or_("image_url.is.null,image_url.eq.")
+                .execute()
+            )
+            monstr_rows = [
+                r for r in (rows.data or [])
+                if (r.get("pvp_collections") or {}).get("is_monstr", False)
+            ]
+            total = len(monstr_rows)
+            if total == 0:
+                await interaction.followup.send("No MONSTR roster rows with missing images. All good!", ephemeral=True)
+                return
+
+            await interaction.followup.send(
+                f"Starting backfill for **{total}** MONSTRs with missing images. "
+                f"This runs in the background — check Railway logs for progress.",
+                ephemeral=True
+            )
+
+            async def _do_backfill():
+                ok = 0
+                fail = 0
+                for r in monstr_rows:
+                    asa_id = r["asa_id"]
+                    try:
+                        url = await asyncio.wait_for(
+                            asyncio.to_thread(_resolve_arc19_image_url, asa_id),
+                            timeout=30
+                        )
+                        if url:
+                            db.table("pvp_rosters").update({"image_url": url}).eq("asa_id", asa_id).execute()
+                            db.table("monstr_pvp_stats").update({"image_url": url}).eq("asa_id", asa_id).execute()
+                            print(f"[PVP] backfill ok: {r.get('nft_name','?')} ({asa_id})")
+                            ok += 1
+                        else:
+                            print(f"[PVP] backfill no-url: {r.get('nft_name','?')} ({asa_id})")
+                            fail += 1
+                    except Exception as e:
+                        print(f"[PVP] backfill failed: {r.get('nft_name','?')} ({asa_id}): {e}")
+                        fail += 1
+                    await asyncio.sleep(1)  # rate-limit IPFS calls
+                print(f"[PVP] backfill complete: {ok} ok, {fail} failed out of {total}")
+
+            asyncio.ensure_future(_do_backfill())
+
+        except Exception as e:
+            print(f"[ERROR] pvp_backfill_images: {e}")
+            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+
     # ─────────────────────────────────────────
     # BATTLE RUNNER — round by round with delays
     # ─────────────────────────────────────────
