@@ -70,9 +70,13 @@ _GATEWAYS = [
 async def _fetch(url, size):
     if not url:
         return None
+    url = url.rstrip("?")
     try:
-        cid  = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
-        urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
+        if "supabase" in url:
+            urls = [url]
+        else:
+            cid  = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
+            urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
         async with aiohttp.ClientSession() as session:
             for u in urls:
                 try:
