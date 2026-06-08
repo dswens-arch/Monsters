@@ -57,14 +57,26 @@ try:
 except ImportError:
     ZAPPIES_NAME_MAP = {}
 
+try:
+    from skuli_image_map import SKULI_IMAGE_MAP
+except ImportError:
+    SKULI_IMAGE_MAP = {}
+
+try:
+    from skuli_name_map import SKULI_NAME_MAP
+except ImportError:
+    SKULI_NAME_MAP = {}
+
 # Map collection_id -> image lookup dict
 COLLECTION_IMAGE_MAPS: dict[int, dict] = {
     2: ZAPPIES_IMAGE_MAP,  # Zappies Reborn
+    3: SKULI_IMAGE_MAP,    # Skuli
 }
 
 # Map collection_id -> name lookup dict
 COLLECTION_NAME_MAPS: dict[int, dict] = {
     2: ZAPPIES_NAME_MAP,   # Zappies Reborn
+    3: SKULI_NAME_MAP,     # Skuli
 }
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
@@ -351,25 +363,38 @@ def _fetch_all_eligible_asa_ids(wallet_address: str) -> dict:
             # Fast path — use in-memory registry, no extra indexer call
             matched = [asa for asa in held_asa_ids if asa in MONSTR_ASSETS]
         else:
-            # Fetch creator's ASA IDs from indexer, intersect with held
-            coll_asa_ids: set = set()
-            next_tok2 = None
+            # Check pvp_collection_creators for additional creator addresses
             try:
-                while True:
-                    url2 = f"{indexer_url}/v2/assets?creator={creator}&limit=1000"
-                    if next_tok2:
-                        url2 += f"&next={next_tok2}"
-                    req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req2, timeout=15) as r2:
-                        data2 = _json.loads(r2.read())
-                    for asset in data2.get("assets", []):
-                        coll_asa_ids.add(str(asset.get("index", "")))
-                    next_tok2 = data2.get("next-token")
-                    if not next_tok2:
-                        break
-            except Exception as e:
-                print(f"[PVP] collection scan failed creator={creator[:8]}...: {e}")
-                continue
+                extra = db.table("pvp_collection_creators") \
+                          .select("creator_address") \
+                          .eq("collection_id", int(coll_id)) \
+                          .execute()
+                creator_addresses = [r["creator_address"] for r in (extra.data or [])]
+                if not creator_addresses:
+                    creator_addresses = [creator]
+            except Exception:
+                creator_addresses = [creator]
+
+            # Fetch ASA IDs from indexer for all creator addresses
+            coll_asa_ids: set = set()
+            for addr in creator_addresses:
+                next_tok2 = None
+                try:
+                    while True:
+                        url2 = f"{indexer_url}/v2/assets?creator={addr}&limit=1000"
+                        if next_tok2:
+                            url2 += f"&next={next_tok2}"
+                        req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req2, timeout=15) as r2:
+                            data2 = _json.loads(r2.read())
+                        for asset in data2.get("assets", []):
+                            coll_asa_ids.add(str(asset.get("index", "")))
+                        next_tok2 = data2.get("next-token")
+                        if not next_tok2:
+                            break
+                except Exception as e:
+                    print(f"[PVP] collection scan failed creator={addr[:8]}...: {e}")
+                    continue
             matched = [asa for asa in held_asa_ids if asa in coll_asa_ids]
 
         if matched:
