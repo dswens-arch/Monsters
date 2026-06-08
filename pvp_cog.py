@@ -1455,13 +1455,13 @@ class PvPCog(commands.Cog):
         self.bot = bot
         self._pending_duels: dict[str, dict] = {}
         self._last_bot_algo: int = 0
-        self._deposit_active_until: float = 0.0   # epoch timestamp; pollers sleep if past this
+        self._deposit_active_until: float = 0.0
         self.poll_deposits.start()
         self.poll_algo_deposits.start()
         self.expire_challenges.start()
         self.daily_leaderboard_post.start()
         self.weekly_pool_reset.start()
-        # Register persistent view so it survives restarts
+        self.image_cache_task.start()
         self.bot.add_view(JoinBattleView())
 
     def cog_unload(self):
@@ -1470,6 +1470,7 @@ class PvPCog(commands.Cog):
         self.expire_challenges.cancel()
         self.daily_leaderboard_post.cancel()
         self.weekly_pool_reset.cancel()
+        self.image_cache_task.cancel()
 
     def _wake_deposit_poller(self, minutes: int = 10):
         """Activate deposit polling for the next N minutes."""
@@ -2774,6 +2775,124 @@ class PvPCog(commands.Cog):
         await _update_board(channel, "waiting", room, status_text="No active challenge")
 
 
+
+    # ─────────────────────────────────────────
+    # IMAGE CACHE TASK
+    # Runs every 30 mins, uploads IPFS images to Supabase Storage.
+    # Board always fetches from Supabase — reliable, no IPFS at render time.
+    # ─────────────────────────────────────────
+
+    @tasks.loop(minutes=30)
+    async def image_cache_task(self):
+        """
+        Find all pvp_rosters rows with IPFS image URLs, fetch and upload
+        to Supabase Storage, update pvp_rosters with the Supabase URL.
+        Processes up to 50 images per run to avoid hammering IPFS.
+        """
+        db      = _db()
+        bucket  = "nft-images"
+        updated = 0
+        failed  = 0
+
+        try:
+            # Find rows with IPFS URLs (not yet on Supabase)
+            rows = db.table("pvp_rosters") \
+                     .select("asa_id, image_url") \
+                     .not_.is_("image_url", "null") \
+                     .not_.like("image_url", "%supabase%") \
+                     .limit(50) \
+                     .execute()
+
+            if not rows.data:
+                return
+
+            print(f"[PVP IMG] Caching {len(rows.data)} images to Supabase Storage...")
+
+            for row in rows.data:
+                asa_id    = row["asa_id"]
+                ipfs_url  = row["image_url"]
+
+                try:
+                    # Fetch from IPFS
+                    import urllib.request
+                    urls = [ipfs_url]
+                    for old, new in [("dweb.link","ipfs.io"),("ipfs.io","dweb.link")]:
+                        if old in ipfs_url:
+                            urls.append(ipfs_url.replace(old, new, 1))
+
+                    image_data = None
+                    for u in urls:
+                        try:
+                            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(req, timeout=20) as r:
+                                image_data = r.read()
+                            if image_data:
+                                break
+                        except Exception:
+                            continue
+
+                    if not image_data:
+                        failed += 1
+                        continue
+
+                    # Detect format
+                    ext = "png"
+                    if image_data[:3] == b'\xff\xd8\xff':
+                        ext = "jpg"
+                    elif image_data[:4] == b'RIFF':
+                        ext = "webp"
+
+                    path = f"pvp/{asa_id}.{ext}"
+
+                    # Upload to Supabase Storage
+                    await asyncio.to_thread(
+                        lambda p=path, d=image_data, e=ext: db.storage.from_(bucket).upload(
+                            path=p, file=d,
+                            file_options={"content-type": f"image/{e}", "upsert": "true"}
+                        )
+                    )
+
+                    public_url = db.storage.from_(bucket).get_public_url(path)
+
+                    # Update pvp_rosters
+                    await asyncio.to_thread(
+                        lambda a=asa_id, u=public_url: db.table("pvp_rosters")
+                            .update({"image_url": u})
+                            .eq("asa_id", a)
+                            .execute()
+                    )
+
+                    # Also update monstr_pvp_stats for MONSTRs
+                    await asyncio.to_thread(
+                        lambda a=asa_id, u=public_url: db.table("monstr_pvp_stats")
+                            .update({"image_url": u})
+                            .eq("asa_id", a)
+                            .execute()
+                    )
+
+                    updated += 1
+                    print(f"[PVP IMG] cached asa={asa_id} -> Supabase")
+
+                    # Small delay between uploads
+                    await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    print(f"[PVP IMG] failed asa={asa_id}: {e}")
+                    failed += 1
+                    continue
+
+        except Exception as e:
+            print(f"[PVP IMG] cache task error: {e}")
+            return
+
+        if updated or failed:
+            print(f"[PVP IMG] Run complete: {updated} uploaded, {failed} failed")
+
+    @image_cache_task.before_loop
+    async def before_image_cache(self):
+        await self.bot.wait_until_ready()
+        # Start first run 2 minutes after boot to let everything settle
+        await asyncio.sleep(120)
 
     async def _send_winner_payout(self, user_id: str, amount: int, duel_id: int):
         """Winner payout is handled custodially in Supabase via _credit_win.
