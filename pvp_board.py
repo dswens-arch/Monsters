@@ -4,7 +4,8 @@ Clean rebuild. Template: battlegame2.png (4800x3584 landscape).
 Output: 1600x1194.
 """
 
-import io, os, urllib.request
+import io, os, urllib.request, asyncio
+import aiohttp
 from typing import Optional
 from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
@@ -79,35 +80,39 @@ def _t(draw, x, y, txt, font, color):
     draw.text((x+2, y+2), txt, font=font, fill=(0,0,0,255), anchor="lt")
     draw.text((x,   y),   txt, font=font, fill=color,       anchor="lt")
 
-def _fetch(url, size):
+_GATEWAYS = [
+    "https://ipfs-pera.algonode.dev/ipfs/{cid}?optimizer=image&width=512&quality=90",
+    "https://cloudflare-ipfs.com/ipfs/{cid}",
+    "https://gateway.pinata.cloud/ipfs/{cid}",
+    "https://dweb.link/ipfs/{cid}",
+]
+
+async def _fetch(url, size):
+    if not url:
+        return None
     try:
-        # Try multiple gateways
-        urls = [
-            url,
-            url.replace("dweb.link", "ipfs.io"),
-            url.replace("dweb.link", "gateway.pinata.cloud"),
-        ]
-        data = None
-        for u in urls:
-            try:
-                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = r.read()
-                break
-            except Exception:
-                continue
-        if not data:
-            raise Exception("all gateways failed")
-        img = Image.open(io.BytesIO(data)).convert("RGBA")
-        img.thumbnail(size, Image.LANCZOS)
-        c = Image.new("RGBA", size, (0,0,0,0))
-        c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
-        return c
+        cid = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
+        urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
+
+        async with aiohttp.ClientSession() as session:
+            for u in urls:
+                try:
+                    async with session.get(u, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        if r.status == 200:
+                            data = await r.read()
+                            img  = Image.open(io.BytesIO(data)).convert("RGBA")
+                            img.thumbnail(size, Image.LANCZOS)
+                            c = Image.new("RGBA", size, (0,0,0,0))
+                            c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
+                            return c
+                except Exception as e:
+                    print(f"[PVP] fetch failed {u[:50]}: {e}")
+                    continue
     except Exception as e:
         print(f"[PVP] NFT fetch failed: {e}")
-        return None
+    return None
 
-def render_board(state, p1=None, p2=None, status_text=""):
+async def render_board(state, p1=None, p2=None, status_text=""):
     board = Image.open(TEMPLATE_PATH).convert("RGBA")
     board = board.resize((OUTPUT_W, OUTPUT_H), Image.LANCZOS)
     draw  = ImageDraw.Draw(board)
@@ -117,13 +122,22 @@ def render_board(state, p1=None, p2=None, status_text=""):
     fs = _font(F_STAT)
     fw = _font(F_WAIT)
 
-    # NFT images
-    for player, zone in [(p1, P1_IMG), (p2, P2_IMG)]:
+    # NFT images — fetch both concurrently
+    async def fetch_player_img(player, zone):
         if player and player.image_url:
             size = (zone[2]-zone[0], zone[3]-zone[1])
-            nft  = _fetch(player.image_url, size)
-            if nft:
-                board.paste(nft, (zone[0], zone[1]), nft)
+            return await _fetch(player.image_url, size)
+        return None
+
+    p1_img, p2_img = await asyncio.gather(
+        fetch_player_img(p1, P1_IMG),
+        fetch_player_img(p2, P2_IMG),
+    )
+
+    if p1_img:
+        board.paste(p1_img, (P1_IMG[0], P1_IMG[1]), p1_img)
+    if p2_img:
+        board.paste(p2_img, (P2_IMG[0], P2_IMG[1]), p2_img)
 
     # Text zones
     for player, zone, slot in [(p1, P1_TEXT, 1), (p2, P2_TEXT, 2)]:
@@ -167,12 +181,13 @@ def render_board(state, p1=None, p2=None, status_text=""):
     buf.seek(0)
     return buf
 
-def board_waiting(p1=None):
-    return render_board("waiting", p1, None,
+
+async def board_waiting(p1=None):
+    return await render_board("waiting", p1, None,
                         "Waiting for opponent..." if p1 else "No active challenge")
 
-def board_active(p1, p2):
-    return render_board("active", p1, p2, "BATTLE IN PROGRESS")
+async def board_active(p1, p2):
+    return await render_board("active", p1, p2, "BATTLE IN PROGRESS")
 
-def board_result(p1, p2):
-    return render_board("result", p1, p2, "BATTLE COMPLETE")
+async def board_result(p1, p2):
+    return await render_board("result", p1, p2, "BATTLE COMPLETE")
