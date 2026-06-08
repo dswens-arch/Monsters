@@ -1382,7 +1382,7 @@ async def _update_board(channel, state: str, room: str = "goo",
                         p1=None, p2=None, status_text: str = ""):
     """Edit the persistent board message in-place for the given room."""
     board = _get_board(room)
-    buf   = await asyncio.to_thread(render_board, state, p1, p2, status_text)
+    buf   = await render_board(state, p1, p2, status_text)
     file  = discord.File(buf, filename="board.png")
     view  = JoinBattleView() if state == "waiting" else discord.ui.View()
 
@@ -1513,7 +1513,7 @@ class PvPCog(commands.Cog):
                         pass
 
                 # No stored board — post a fresh one
-                buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+                buf  = await render_board( "waiting", None, None, "No active challenge")
                 file = discord.File(buf, filename="board.png")
                 msg  = await channel.send(file=file, view=JoinBattleView())
                 board.board_msg_id = msg.id
@@ -2486,7 +2486,7 @@ class PvPCog(commands.Cog):
     async def pvp_setupboard(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction): return
         await interaction.response.defer(ephemeral=True)
-        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+        buf  = await render_board( "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
         _board.board_msg_id = msg.id
@@ -2501,7 +2501,7 @@ class PvPCog(commands.Cog):
     async def pvp_setupboard_algo(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction): return
         await interaction.response.defer(ephemeral=True)
-        buf  = await asyncio.to_thread(render_board, "waiting", None, None, "No active challenge")
+        buf  = await render_board( "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
         _board_algo.board_msg_id = msg.id
@@ -2682,7 +2682,7 @@ class PvPCog(commands.Cog):
                 win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
                     total_rounds=result.total_rounds, wager_won=winner_cut,
                     image_url=winner_m.image_url, is_draw=False, is_algo=(room=="algo"))
-            result_buf = await asyncio.to_thread(render_result, win_info)
+            result_buf = await render_result(win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
             import traceback
