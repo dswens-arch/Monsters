@@ -466,7 +466,7 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
 
         # Step 3: Fetch metadata JSON
         metadata = None
-        for gw in ["https://ipfs.algonode.xyz/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/"]:
+        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
             try:
                 req2 = urllib.request.Request(f"{gw}{metadata_cid}",
                     headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
@@ -486,7 +486,11 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
             return None
 
         image_cid = image_field.replace("ipfs://", "")
-        result_url = f"https://dweb.link/ipfs/{image_cid}"
+        # Qm... (CIDv0) works on dweb.link; bafk... (CIDv1) works on ipfs.io
+        if image_cid.startswith("bafk"):
+            result_url = f"https://ipfs.io/ipfs/{image_cid}"
+        else:
+            result_url = f"https://dweb.link/ipfs/{image_cid}"
         print(f"[PVP] Image URL resolved for ASA {asa_id}: {result_url[:60]}")
         return result_url
 
