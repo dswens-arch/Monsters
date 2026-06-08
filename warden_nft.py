@@ -98,35 +98,49 @@ def fetch_held_tier_nfts(wallet_address: str) -> set[str]:
     Called once per player per encounter on their first attack.
     Synchronous — wrap in asyncio.to_thread() at the call site.
     """
-    try:
-        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
-        url = f"{indexer_url}/v2/accounts/{wallet_address}/assets"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "X-Indexer-API-Token": os.getenv("INDEXER_TOKEN", ""),
-        })
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read())
+    import time as _time
+    indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+    indexer_token = os.getenv("INDEXER_TOKEN", "")
+    url = f"{indexer_url}/v2/accounts/{wallet_address}/assets"
 
-        held_asset_ids = {
-            a["asset-id"]
-            for a in data.get("assets", [])
-            if a.get("amount", 0) > 0
-        }
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                _time.sleep(2 ** attempt)  # 2s, 4s
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "X-Algo-API-Token": indexer_token,
+                "X-Indexer-API-Token": indexer_token,
+            })
+            with urllib.request.urlopen(req, timeout=6) as r:
+                data = json.loads(r.read())
 
-        tiers_held = {
-            ASSET_TO_TIER[aid]
-            for aid in held_asset_ids
-            if aid in ASSET_TO_TIER
-        }
+            held_asset_ids = {
+                a["asset-id"]
+                for a in data.get("assets", [])
+                if a.get("amount", 0) > 0
+            }
 
-        if tiers_held:
-            logger.info(f"[WARDEN NFT] {wallet_address[:8]}... holds tier NFTs: {tiers_held}")
-        return tiers_held
+            tiers_held = {
+                ASSET_TO_TIER[aid]
+                for aid in held_asset_ids
+                if aid in ASSET_TO_TIER
+            }
 
-    except Exception as e:
-        logger.warning(f"[WARDEN NFT] fetch_held_tier_nfts failed for {wallet_address[:8]}...: {e}")
-        return set()
+            if tiers_held:
+                logger.info(f"[WARDEN NFT] {wallet_address[:8]}... holds tier NFTs: {tiers_held}")
+            return tiers_held
+
+        except Exception as e:
+            err = str(e)
+            if "403" in err or "429" in err:
+                logger.warning(f"[WARDEN NFT] rate limited for {wallet_address[:8]}..., retrying (attempt {attempt+1}/3)...")
+                continue
+            logger.warning(f"[WARDEN NFT] fetch_held_tier_nfts failed for {wallet_address[:8]}...: {e}")
+            return set()
+
+    logger.warning(f"[WARDEN NFT] fetch_held_tier_nfts exhausted retries for {wallet_address[:8]}...")
+    return set()
 
 
 # ─────────────────────────────────────────────
