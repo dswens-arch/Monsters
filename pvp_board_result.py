@@ -61,36 +61,21 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        if "supabase" in url:
-            urls = [url]
-        else:
-            cid_path = None
-            for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
-                            "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
-                if url.startswith(prefix):
-                    cid_path = url[len(prefix):]
-                    break
-            if cid_path:
-                cid_root = cid_path.split("/")[0]
-                if cid_root.startswith("baf"):
-                    urls = [
-                        f"https://ipfs.io/ipfs/{cid_path}",
-                        f"https://nftstorage.link/ipfs/{cid_path}",
-                        f"https://dweb.link/ipfs/{cid_path}",
-                    ]
-                else:
-                    urls = [
-                        f"https://dweb.link/ipfs/{cid_path}",
-                        f"https://ipfs.io/ipfs/{cid_path}",
-                        f"https://nftstorage.link/ipfs/{cid_path}",
-                    ]
-            else:
-                urls = [url]
+        urls = [url]
+        for old, new in [
+            ("dweb.link", "ipfs.io"),
+            ("ipfs.io", "dweb.link"),
+            ("dweb.link", "gateway.pinata.cloud"),
+        ]:
+            if old in url:
+                urls.append(url.replace(old, new, 1))
+        seen = set()
+        urls = [u for u in urls if not (u in seen or seen.add(u))]
 
         for u in urls:
             try:
                 req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with urllib.request.urlopen(req, timeout=10) as r:
                     data = r.read()
                 img = Image.open(io.BytesIO(data)).convert("RGBA")
                 img.thumbnail(size, Image.LANCZOS)
