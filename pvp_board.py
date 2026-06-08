@@ -81,27 +81,28 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        # Normalize to CID so we can try gateways in order
-        cid = None
+        # Normalize to CID+path so we can try gateways in order
+        cid_path = None
         for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
                         "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
             if url.startswith(prefix):
-                cid = url[len(prefix):]
+                cid_path = url[len(prefix):]  # preserves full path e.g. "CID/1422.png"
                 break
-        if cid:
-            # ipfs.io confirmed working for bafk CIDv1 on this Railway project
-            # dweb.link confirmed working for Qm CIDv0
-            if cid.startswith("bafk"):
+        if cid_path:
+            # CIDv1 (bafk..., bafy...) — use ipfs.io
+            # CIDv0 (Qm...) — use dweb.link
+            cid_root = cid_path.split("/")[0]
+            if cid_root.startswith("baf"):
                 urls = [
-                    f"https://ipfs.io/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
-                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://ipfs.io/ipfs/{cid_path}",
+                    f"https://nftstorage.link/ipfs/{cid_path}",
+                    f"https://dweb.link/ipfs/{cid_path}",
                 ]
             else:
                 urls = [
-                    f"https://dweb.link/ipfs/{cid}",
-                    f"https://ipfs.io/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
+                    f"https://dweb.link/ipfs/{cid_path}",
+                    f"https://ipfs.io/ipfs/{cid_path}",
+                    f"https://nftstorage.link/ipfs/{cid_path}",
                 ]
         else:
             urls = [url]
