@@ -79,47 +79,26 @@ def _t(draw, x, y, txt, font, color):
     draw.text((x+2, y+2), txt, font=font, fill=(0,0,0,255), anchor="lt")
     draw.text((x,   y),   txt, font=font, fill=color,       anchor="lt")
 
-_image_cache: dict = {}
-
 def _fetch(url, size):
-    # Check cache first
-    cache_key = f"{url}_{size[0]}x{size[1]}"
-    if cache_key in _image_cache:
-        return _image_cache[cache_key]
-
     try:
-        # Supabase Storage URLs are plain HTTPS — fetch directly, no gateway juggling
-        if "supabase" in url:
-            urls = [url]
-        else:
-            cid_path = None
-            for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
-                            "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
-                if url.startswith(prefix):
-                    cid_path = url[len(prefix):]
-                    break
-            if cid_path:
-                cid_root = cid_path.split("/")[0]
-                if cid_root.startswith("baf"):
-                    urls = [
-                        f"https://ipfs.io/ipfs/{cid_path}",
-                        f"https://nftstorage.link/ipfs/{cid_path}",
-                        f"https://dweb.link/ipfs/{cid_path}",
-                    ]
-                else:
-                    urls = [
-                        f"https://dweb.link/ipfs/{cid_path}",
-                        f"https://ipfs.io/ipfs/{cid_path}",
-                        f"https://nftstorage.link/ipfs/{cid_path}",
-                    ]
-            else:
-                urls = [url]
+        # Try original URL first, then swap gateway prefix
+        urls = [url]
+        for old, new in [
+            ("dweb.link", "ipfs.io"),
+            ("ipfs.io", "dweb.link"),
+            ("dweb.link", "gateway.pinata.cloud"),
+        ]:
+            if old in url:
+                urls.append(url.replace(old, new, 1))
+        # Deduplicate preserving order
+        seen = set()
+        urls = [u for u in urls if not (u in seen or seen.add(u))]
 
         data = None
         for u in urls:
             try:
                 req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with urllib.request.urlopen(req, timeout=10) as r:
                     data = r.read()
                 break
             except Exception:
@@ -130,7 +109,6 @@ def _fetch(url, size):
         img.thumbnail(size, Image.LANCZOS)
         c = Image.new("RGBA", size, (0,0,0,0))
         c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
-        _image_cache[cache_key] = c
         return c
     except Exception as e:
         print(f"[PVP] NFT fetch failed: {e}")
@@ -184,13 +162,9 @@ def render_board(state, p1=None, p2=None, status_text=""):
         _t(draw, x1, ty, f"@{player.username}", fu, YELLOW)
         ty += F_USER + gap
 
-        # Show ? if stats are hidden (waiting for opponent)
-        atk_str = f"ATK {player.attack}" if player.attack > 0 else "ATK ?"
-        def_str = f"DEF {player.defense}" if player.defense > 0 else "DEF ?"
-        spd_str = f"SPD {player.speed}"   if player.speed  > 0 else "SPD ?"
-        _t(draw, x1,       ty, atk_str, fs, RED)
-        _t(draw, x1 + 220, ty, def_str, fs, BLUE)
-        _t(draw, x1 + 440, ty, spd_str, fs, GREEN)
+        _t(draw, x1,       ty, f"ATK {player.attack}",  fs, RED)
+        _t(draw, x1 + 220, ty, f"DEF {player.defense}", fs, BLUE)
+        _t(draw, x1 + 440, ty, f"SPD {player.speed}",   fs, GREEN)
 
     buf = io.BytesIO()
     board.convert("RGB").save(buf, format="PNG")
