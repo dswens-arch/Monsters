@@ -155,9 +155,12 @@ def render_board(state, p1=None, p2=None, status_text=""):
         _t(draw, x1, ty, f"@{player.username}", fu, YELLOW)
         ty += F_USER + gap
 
-        _t(draw, x1,       ty, f"ATK {player.attack}",  fs, RED)
-        _t(draw, x1 + 220, ty, f"DEF {player.defense}", fs, BLUE)
-        _t(draw, x1 + 440, ty, f"SPD {player.speed}",   fs, GREEN)
+        atk_str = f"ATK {player.attack}" if player.attack > 0 else "ATK ?"
+        def_str = f"DEF {player.defense}" if player.defense > 0 else "DEF ?"
+        spd_str = f"SPD {player.speed}"   if player.speed  > 0 else "SPD ?"
+        _t(draw, x1,       ty, atk_str, fs, RED)
+        _t(draw, x1 + 220, ty, def_str, fs, BLUE)
+        _t(draw, x1 + 440, ty, spd_str, fs, GREEN)
 
     buf = io.BytesIO()
     board.convert("RGB").save(buf, format="PNG")
