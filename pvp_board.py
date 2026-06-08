@@ -88,28 +88,32 @@ def _fetch(url, size):
         return _image_cache[cache_key]
 
     try:
-        cid_path = None
-        for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
-                        "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
-            if url.startswith(prefix):
-                cid_path = url[len(prefix):]
-                break
-        if cid_path:
-            cid_root = cid_path.split("/")[0]
-            if cid_root.startswith("baf"):
-                urls = [
-                    f"https://ipfs.io/ipfs/{cid_path}",
-                    f"https://nftstorage.link/ipfs/{cid_path}",
-                    f"https://dweb.link/ipfs/{cid_path}",
-                ]
-            else:
-                urls = [
-                    f"https://dweb.link/ipfs/{cid_path}",
-                    f"https://ipfs.io/ipfs/{cid_path}",
-                    f"https://nftstorage.link/ipfs/{cid_path}",
-                ]
-        else:
+        # Supabase Storage URLs are plain HTTPS — fetch directly, no gateway juggling
+        if "supabase" in url:
             urls = [url]
+        else:
+            cid_path = None
+            for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
+                            "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
+                if url.startswith(prefix):
+                    cid_path = url[len(prefix):]
+                    break
+            if cid_path:
+                cid_root = cid_path.split("/")[0]
+                if cid_root.startswith("baf"):
+                    urls = [
+                        f"https://ipfs.io/ipfs/{cid_path}",
+                        f"https://nftstorage.link/ipfs/{cid_path}",
+                        f"https://dweb.link/ipfs/{cid_path}",
+                    ]
+                else:
+                    urls = [
+                        f"https://dweb.link/ipfs/{cid_path}",
+                        f"https://ipfs.io/ipfs/{cid_path}",
+                        f"https://nftstorage.link/ipfs/{cid_path}",
+                    ]
+            else:
+                urls = [url]
 
         data = None
         for u in urls:
@@ -126,7 +130,6 @@ def _fetch(url, size):
         img.thumbnail(size, Image.LANCZOS)
         c = Image.new("RGBA", size, (0,0,0,0))
         c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
-        # Cache successful result
         _image_cache[cache_key] = c
         return c
     except Exception as e:
