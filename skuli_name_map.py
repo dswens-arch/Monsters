@@ -1,4 +1,3 @@
-# Auto-generated Skuli name map
 SKULI_NAME_MAP = {
     "544176827": "skuli frens #1",
     "544176834": "skuli frens #2",
