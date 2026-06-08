@@ -79,18 +79,22 @@ def _t(draw, x, y, txt, font, color):
     draw.text((x+2, y+2), txt, font=font, fill=(0,0,0,255), anchor="lt")
     draw.text((x,   y),   txt, font=font, fill=color,       anchor="lt")
 
+_image_cache: dict = {}
+
 def _fetch(url, size):
+    # Check cache first
+    cache_key = f"{url}_{size[0]}x{size[1]}"
+    if cache_key in _image_cache:
+        return _image_cache[cache_key]
+
     try:
-        # Normalize to CID+path so we can try gateways in order
         cid_path = None
         for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
                         "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
             if url.startswith(prefix):
-                cid_path = url[len(prefix):]  # preserves full path e.g. "CID/1422.png"
+                cid_path = url[len(prefix):]
                 break
         if cid_path:
-            # CIDv1 (bafk..., bafy...) — use ipfs.io
-            # CIDv0 (Qm...) — use dweb.link
             cid_root = cid_path.split("/")[0]
             if cid_root.startswith("baf"):
                 urls = [
@@ -111,7 +115,7 @@ def _fetch(url, size):
         for u in urls:
             try:
                 req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=8) as r:
+                with urllib.request.urlopen(req, timeout=15) as r:
                     data = r.read()
                 break
             except Exception:
@@ -122,6 +126,8 @@ def _fetch(url, size):
         img.thumbnail(size, Image.LANCZOS)
         c = Image.new("RGBA", size, (0,0,0,0))
         c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
+        # Cache successful result
+        _image_cache[cache_key] = c
         return c
     except Exception as e:
         print(f"[PVP] NFT fetch failed: {e}")
