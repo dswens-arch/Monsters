@@ -90,9 +90,15 @@ _GATEWAYS = [
 async def _fetch(url, size):
     if not url:
         return None
+    # Strip trailing ? if present
+    url = url.rstrip("?")
     try:
-        cid = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
-        urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
+        # Supabase Storage URLs — fetch directly, no gateway needed
+        if "supabase" in url:
+            urls = [url]
+        else:
+            cid  = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
+            urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
 
         async with aiohttp.ClientSession() as session:
             for u in urls:
