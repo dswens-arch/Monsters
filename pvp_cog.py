@@ -2511,40 +2511,60 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_refreshimage",
-        description="(Admin) Re-fetch and update the image for a MONSTR by number or ASA ID"
+        description="(Admin) Re-fetch and update the image for any registered fighter by ASA ID"
     )
     @discord.app_commands.default_permissions(administrator=True)
-    @discord.app_commands.describe(monstr="MONSTR number (e.g. 8 or #0008) or ASA ID")
+    @discord.app_commands.describe(monstr="MONSTR number (e.g. 8 or #0008) or any ASA ID")
     async def pvp_refreshimage(self, interaction: discord.Interaction, monstr: str):
         await interaction.response.defer(ephemeral=True)
         try:
             db = _db()
             monstr = monstr.strip()
-            # Resolve by name unless it looks like a real ASA ID (large number)
             num_str = monstr.upper().replace("MONSTR", "").replace("#", "").strip()
             is_asa_id = num_str.isdigit() and int(num_str) > 9999
+
             if is_asa_id:
-                asa_id = num_str
+                asa_id  = num_str
                 display = f"ASA `{num_str}`"
             else:
-                # Normalize "8", "08", "#0008", "MONSTR #0008" -> "MONSTR #XXXX"
                 if num_str.isdigit():
                     padded = f"MONSTR #{int(num_str):04d}"
                     row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", padded).execute()
                 else:
                     row = db.table("monstr_pvp_stats").select("asa_id,monstr_name").ilike("monstr_name", f"%{num_str}%").execute()
                 if not row.data:
-                    await interaction.followup.send(f"Could not find a registered MONSTR matching `{monstr}`.", ephemeral=True)
+                    await interaction.followup.send(f"Could not find a registered fighter matching `{monstr}`.", ephemeral=True)
                     return
-                asa_id = row.data[0]["asa_id"]
+                asa_id  = row.data[0]["asa_id"]
                 display = row.data[0]["monstr_name"]
-            new_url = await asyncio.wait_for(
-                asyncio.to_thread(_resolve_arc19_image_url, asa_id),
-                timeout=30
-            )
+
+            # Check if this ASA is in a partner collection image map
+            roster_row = db.table("pvp_rosters").select("collection_id").eq("asa_id", asa_id).execute()
+            new_url    = None
+
+            if roster_row.data:
+                coll_id       = roster_row.data[0]["collection_id"]
+                coll_image_map = COLLECTION_IMAGE_MAPS.get(coll_id, {})
+                if coll_image_map:
+                    # Partner collection — pull from pre-loaded map
+                    new_url = coll_image_map.get(str(asa_id))
+                    if not new_url:
+                        await interaction.followup.send(
+                            f"No image found in collection map for `{display}`. "
+                            f"The CSV may not include this ASA.", ephemeral=True)
+                        return
+
+            if not new_url:
+                # MONSTR or unknown — resolve via ARC-19
+                new_url = await asyncio.wait_for(
+                    asyncio.to_thread(_resolve_arc19_image_url, asa_id),
+                    timeout=30
+                )
+
             if not new_url:
                 await interaction.followup.send(f"Could not resolve image for {display}. Check the ASA and try again.", ephemeral=True)
                 return
+
             db.table("monstr_pvp_stats").update({"image_url": new_url}).eq("asa_id", asa_id).execute()
             db.table("pvp_rosters").update({"image_url": new_url}).eq("asa_id", asa_id).execute()
             await interaction.followup.send(f"Image updated for **{display}**.\n{new_url}", ephemeral=True)
