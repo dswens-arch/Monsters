@@ -52,9 +52,19 @@ try:
 except ImportError:
     ZAPPIES_IMAGE_MAP = {}
 
+try:
+    from zappies_name_map import ZAPPIES_NAME_MAP
+except ImportError:
+    ZAPPIES_NAME_MAP = {}
+
 # Map collection_id -> image lookup dict
 COLLECTION_IMAGE_MAPS: dict[int, dict] = {
     2: ZAPPIES_IMAGE_MAP,  # Zappies Reborn
+}
+
+# Map collection_id -> name lookup dict
+COLLECTION_NAME_MAPS: dict[int, dict] = {
+    2: ZAPPIES_NAME_MAP,   # Zappies Reborn
 }
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
@@ -486,7 +496,6 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
             return None
 
         image_cid = image_field.replace("ipfs://", "")
-        # Qm... (CIDv0) works on dweb.link; bafk... (CIDv1) works on ipfs.io
         if image_cid.startswith("bafk"):
             result_url = f"https://ipfs.io/ipfs/{image_cid}"
         else:
@@ -1714,18 +1723,16 @@ class PvPCog(commands.Cog):
                 continue
 
             if is_monstr:
-                # ── MONSTRS: sequential (fast, uses in-memory registry) ───────
+                # ── MONSTRS: all data from in-memory registry + monstr_pvp_stats ─
+                # Never block registration on IPFS — seed instantly, fetch images in background
+                rows_to_insert = []
+                needs_image    = []  # asa_ids that have no image yet
+
                 for asa_id in new_asa_ids:
                     nft_name = MONSTR_ASSETS.get(asa_id, (f"MONSTR #{asa_id[-4:]}",))[0]
                     mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
                     if not mps.data:
                         atk_b, def_b, spd_b = _calc_trait_bonus(asa_id)
-                        try:
-                            live_image_url = await asyncio.wait_for(
-                                asyncio.to_thread(_resolve_arc19_image_url, asa_id), timeout=20
-                            )
-                        except Exception:
-                            live_image_url = None
                         db.table("monstr_pvp_stats").insert({
                             "asa_id":          asa_id,
                             "owner_id":        user_id,
@@ -1736,53 +1743,72 @@ class PvPCog(commands.Cog):
                             "trait_bonus_atk": atk_b,
                             "trait_bonus_def": def_b,
                             "trait_bonus_spd": spd_b,
-                            "image_url":       live_image_url or "",
+                            "image_url":       "",
                         }).execute()
                         mps = db.table("monstr_pvp_stats").select("*").eq("asa_id", asa_id).execute()
 
                     r         = mps.data[0]
-                    try:
-                        db.table("pvp_rosters").insert({
-                            "user_id":       user_id,
-                            "asa_id":        asa_id,
-                            "nft_name":      nft_name,
-                            "collection_id": int(coll_id_str),
-                            "image_url":     r.get("image_url") or None,
-                            "attack":        r["attack"],
-                            "defense":       r["defense"],
-                            "speed":         r["speed"],
-                            "level":         1,
-                            "xp":            0,
-                            "verified_at":   datetime.now(timezone.utc).isoformat(),
-                        }).execute()
-                        added_summary.setdefault(coll_name, []).append(nft_name)
-                        print(f"[PVP] roster seeded {nft_name} (asa={asa_id}) uid={user_id}")
-                    except Exception as e:
-                        print(f"[PVP] roster insert failed asa={asa_id}: {e}")
+                    image_url = r.get("image_url") or None
+                    if not image_url:
+                        needs_image.append(asa_id)
+
+                    rows_to_insert.append({
+                        "user_id":       user_id,
+                        "asa_id":        asa_id,
+                        "nft_name":      nft_name,
+                        "collection_id": int(coll_id_str),
+                        "image_url":     image_url,
+                        "attack":        r["attack"],
+                        "defense":       r["defense"],
+                        "speed":         r["speed"],
+                        "level":         1,
+                        "xp":            0,
+                        "verified_at":   datetime.now(timezone.utc).isoformat(),
+                    })
+                    added_summary.setdefault(coll_name, []).append(nft_name)
+
+                # Batch insert instantly
+                try:
+                    db.table("pvp_rosters").insert(rows_to_insert).execute()
+                    for row in rows_to_insert:
+                        print(f"[PVP] roster seeded {row['nft_name']} (asa={row['asa_id']}) uid={user_id}")
+                except Exception as e:
+                    print(f"[PVP] batch insert failed coll={coll_name}: {e}")
+                    for row in rows_to_insert:
+                        try:
+                            db.table("pvp_rosters").insert(row).execute()
+                        except Exception as e2:
+                            print(f"[PVP] individual insert failed asa={row['asa_id']}: {e2}")
+
+                # Background image fetch for any MONSTRs with no image
+                if needs_image:
+                    async def _fetch_missing_images(asa_ids: list, db):
+                        for asa_id in asa_ids:
+                            try:
+                                url = await asyncio.wait_for(
+                                    asyncio.to_thread(_resolve_arc19_image_url, asa_id), timeout=30
+                                )
+                                if url:
+                                    db.table("monstr_pvp_stats").update({"image_url": url}).eq("asa_id", asa_id).execute()
+                                    db.table("pvp_rosters").update({"image_url": url}).eq("asa_id", asa_id).execute()
+                                    print(f"[PVP] background image fetched {asa_id}")
+                            except Exception as e:
+                                print(f"[PVP] background image fetch failed {asa_id}: {e}")
+                    asyncio.ensure_future(_fetch_missing_images(needs_image, db))
+                    print(f"[PVP] {len(needs_image)} MONSTRs queued for background image fetch")
 
             else:
-                # ── PARTNER NFTs: image from pre-loaded map, name from ARC-19 ──
+                # ── PARTNER NFTs: name + image from pre-loaded maps — no network calls ──
                 coll_image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id_str), {})
+                coll_name_map  = COLLECTION_NAME_MAPS.get(int(coll_id_str), {})
 
                 await interaction.edit_original_response(
                     content=f"🔍 Registering {len(new_asa_ids)} {coll_name} NFTs..."
                 )
 
-                async def _fetch_name(asa_id: str):
-                    try:
-                        name, _ = await asyncio.wait_for(
-                            asyncio.to_thread(_resolve_arc19_name_and_image, asa_id),
-                            timeout=15
-                        )
-                        return asa_id, name or f"#{asa_id}"
-                    except Exception:
-                        return asa_id, f"#{asa_id}"
-
-                name_results = await asyncio.gather(*[_fetch_name(a) for a in new_asa_ids])
-
-                # Batch insert all partner NFTs
                 rows_to_insert = []
-                for asa_id, nft_name in name_results:
+                for asa_id in new_asa_ids:
+                    nft_name  = coll_name_map.get(asa_id) or f"#{asa_id}"
                     image_url = coll_image_map.get(asa_id)
                     rows_to_insert.append({
                         "user_id":       user_id,
