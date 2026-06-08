@@ -61,24 +61,25 @@ def _t(draw, x, y, txt, font, color):
 
 def _fetch(url, size):
     try:
-        cid = None
+        cid_path = None
         for prefix in ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/",
                         "https://ipfs.algonode.xyz/ipfs/", "https://gateway.pinata.cloud/ipfs/"]:
             if url.startswith(prefix):
-                cid = url[len(prefix):]
+                cid_path = url[len(prefix):]
                 break
-        if cid:
-            if cid.startswith("bafk"):
+        if cid_path:
+            cid_root = cid_path.split("/")[0]
+            if cid_root.startswith("baf"):
                 urls = [
-                    f"https://ipfs.io/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
-                    f"https://dweb.link/ipfs/{cid}",
+                    f"https://ipfs.io/ipfs/{cid_path}",
+                    f"https://nftstorage.link/ipfs/{cid_path}",
+                    f"https://dweb.link/ipfs/{cid_path}",
                 ]
             else:
                 urls = [
-                    f"https://dweb.link/ipfs/{cid}",
-                    f"https://ipfs.io/ipfs/{cid}",
-                    f"https://nftstorage.link/ipfs/{cid}",
+                    f"https://dweb.link/ipfs/{cid_path}",
+                    f"https://ipfs.io/ipfs/{cid_path}",
+                    f"https://nftstorage.link/ipfs/{cid_path}",
                 ]
         else:
             urls = [url]
