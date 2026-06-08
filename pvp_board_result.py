@@ -11,7 +11,8 @@ Zones (template space):
   Winner text (right side):     x=2000-4200  y=1069-2349
 """
 
-import io, os, urllib.request
+import io, os, urllib.request, asyncio
+import aiohttp
 from typing import Optional
 from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
@@ -59,34 +60,33 @@ def _t(draw, x, y, txt, font, color):
     draw.text((x,   y),   txt, font=font, fill=color,       anchor="lt")
 
 
-def _fetch(url, size):
-    try:
-        if "supabase" in url:
-            urls = [url]
-        else:
-            urls = [url]
-            for old, new in [
-                ("dweb.link", "ipfs.io"),
-                ("ipfs.io", "dweb.link"),
-                ("dweb.link", "gateway.pinata.cloud"),
-            ]:
-                if old in url:
-                    urls.append(url.replace(old, new, 1))
-            seen = set()
-            urls = [u for u in urls if not (u in seen or seen.add(u))]
+_GATEWAYS = [
+    "https://ipfs-pera.algonode.dev/ipfs/{cid}?optimizer=image&width=512&quality=90",
+    "https://cloudflare-ipfs.com/ipfs/{cid}",
+    "https://gateway.pinata.cloud/ipfs/{cid}",
+    "https://dweb.link/ipfs/{cid}",
+]
 
-        for u in urls:
-            try:
-                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    data = r.read()
-                img = Image.open(io.BytesIO(data)).convert("RGBA")
-                img.thumbnail(size, Image.LANCZOS)
-                c = Image.new("RGBA", size, (0,0,0,0))
-                c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
-                return c
-            except Exception:
-                continue
+async def _fetch(url, size):
+    if not url:
+        return None
+    try:
+        cid  = url.split("/ipfs/")[-1].split("?")[0].strip() if "/ipfs/" in url else None
+        urls = [g.format(cid=cid) for g in _GATEWAYS] if cid else [url]
+        async with aiohttp.ClientSession() as session:
+            for u in urls:
+                try:
+                    async with session.get(u, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        if r.status == 200:
+                            data = await r.read()
+                            img  = Image.open(io.BytesIO(data)).convert("RGBA")
+                            img.thumbnail(size, Image.LANCZOS)
+                            c = Image.new("RGBA", size, (0,0,0,0))
+                            c.paste(img, ((size[0]-img.width)//2, (size[1]-img.height)//2), img)
+                            return c
+                except Exception as e:
+                    print(f"[PVP RESULT] fetch failed {u[:50]}: {e}")
+                    continue
     except Exception as e:
         print(f"[PVP RESULT] NFT fetch failed: {e}")
     return None
@@ -103,13 +103,13 @@ class WinnerInfo:
     is_algo:      bool = False
 
 
-def render_result(winner: WinnerInfo) -> io.BytesIO:
+async def render_result(winner: WinnerInfo) -> io.BytesIO:
     board = Image.open(RESULT_TEMPLATE_PATH).convert("RGBA")
     board = board.resize((OUTPUT_W, OUTPUT_H), Image.LANCZOS)
 
     # NFT image
     if winner.image_url and not winner.is_draw:
-        nft = _fetch(winner.image_url, (WIN_IMG_W, WIN_IMG_H))
+        nft = await _fetch(winner.image_url, (WIN_IMG_W, WIN_IMG_H))
         if nft:
             board.paste(nft, (WIN_IMG[0], WIN_IMG[1]), nft)
 
