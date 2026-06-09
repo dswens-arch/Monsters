@@ -3686,16 +3686,25 @@ class EncountersCog(commands.Cog):
         if user_id not in state.nft_cache:
             try:
                 db_nft = get_supabase()
-                wallet_row = db_nft.table("linked_wallets").select("wallet_address").eq("user_id", str(user_id)).execute()
-                if wallet_row.data and wallet_row.data[0].get("wallet_address"):
-                    wallet_addr = wallet_row.data[0]["wallet_address"]
-                    held = await asyncio.wait_for(
-                        asyncio.to_thread(fetch_held_tier_nfts, wallet_addr),
-                        timeout=6
-                    )
+                # Fast path: check warden_nft_awards table (Supabase) — no chain call needed
+                awards_row = db_nft.table("warden_nft_awards").select("tier").eq("discord_id", str(user_id)).execute()
+                if awards_row.data:
+                    held = {r["tier"] for r in awards_row.data}
+                    print(f"[WARDEN NFT] {user_id} holds tiers from DB: {held}")
                     state.nft_cache[user_id] = held
                 else:
-                    state.nft_cache[user_id] = set()
+                    # Slow path: no DB record — check on-chain in case they hold but weren't awarded via bot
+                    wallet_row = db_nft.table("linked_wallets").select("wallet_address").eq("user_id", str(user_id)).execute()
+                    if wallet_row.data and wallet_row.data[0].get("wallet_address"):
+                        wallet_addr = wallet_row.data[0]["wallet_address"]
+                        held = await asyncio.wait_for(
+                            asyncio.to_thread(fetch_held_tier_nfts, wallet_addr),
+                            timeout=20
+                        )
+                        print(f"[WARDEN NFT] {user_id} on-chain lookup: {held}")
+                        state.nft_cache[user_id] = held
+                    else:
+                        state.nft_cache[user_id] = set()
             except Exception as e:
                 print(f"[WARDEN NFT] cache fetch failed for {user_id}: {e}")
                 state.nft_cache[user_id] = set()
