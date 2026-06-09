@@ -78,6 +78,84 @@ COLLECTION_NAME_MAPS: dict[int, dict] = {
     2: ZAPPIES_NAME_MAP,   # Zappies Reborn
     3: SKULI_NAME_MAP,     # Skuli
 }
+
+# ─────────────────────────────────────────────
+# PARTNER ASSETS CACHE
+# {collection_id_str: set(asa_id_str, ...)}
+# Loaded at startup and refreshed every 4 hours so join is fast.
+# ─────────────────────────────────────────────
+PARTNER_ASSETS: dict[str, set] = {}
+
+
+def _build_partner_assets_cache() -> dict[str, set]:
+    """
+    Build PARTNER_ASSETS from COLLECTION_IMAGE_MAPS keys (Zappies, Skuli, etc).
+    These maps are already loaded from CSV so no indexer calls needed.
+    Falls back to indexer scan for any partner collection not in a local image map.
+    """
+    import urllib.request, json as _json
+
+    cache: dict[str, set] = {}
+    db = _db()
+
+    try:
+        colls = db.table("pvp_collections").select("*").eq("active", True).execute()
+        collections = colls.data or []
+    except Exception as e:
+        print(f"[PVP] partner cache: pvp_collections fetch failed: {e}")
+        return cache
+
+    indexer_url = os.environ.get("INDEXER_URL", "")
+
+    for coll in collections:
+        coll_id   = str(coll["id"])
+        is_monstr = coll.get("is_monstr", False)
+        if is_monstr:
+            continue  # MONSTR_ASSETS handles this
+
+        # Fast path — use local image map keys if available
+        image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id))
+        if image_map:
+            cache[coll_id] = set(image_map.keys())
+            print(f"[PVP] partner cache: collection {coll_id} loaded {len(cache[coll_id])} ASAs from image map")
+            continue
+
+        # Fallback — scan indexer by creator address
+        try:
+            extra = db.table("pvp_collection_creators") \
+                      .select("creator_address") \
+                      .eq("collection_id", int(coll_id)) \
+                      .execute()
+            creator_addresses = [r["creator_address"] for r in (extra.data or [])]
+            if not creator_addresses:
+                creator_addresses = [coll["creator_address"]]
+        except Exception:
+            creator_addresses = [coll["creator_address"]]
+
+        coll_asa_ids: set = set()
+        for addr in creator_addresses:
+            next_tok = None
+            try:
+                while True:
+                    url = f"{indexer_url}/v2/assets?creator={addr}&limit=1000"
+                    if next_tok:
+                        url += f"&next={next_tok}"
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        data = _json.loads(r.read())
+                    for asset in data.get("assets", []):
+                        coll_asa_ids.add(str(asset.get("index", "")))
+                    next_tok = data.get("next-token")
+                    if not next_tok:
+                        break
+            except Exception as e:
+                print(f"[PVP] partner cache: indexer scan failed creator={addr[:8]}...: {e}")
+
+        if coll_asa_ids:
+            cache[coll_id] = coll_asa_ids
+            print(f"[PVP] partner cache: collection {coll_id} loaded {len(coll_asa_ids)} ASAs via indexer")
+
+    return cache
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
 
@@ -363,38 +441,8 @@ def _fetch_all_eligible_asa_ids(wallet_address: str) -> dict:
             # Fast path — use in-memory registry, no extra indexer call
             matched = [asa for asa in held_asa_ids if asa in MONSTR_ASSETS]
         else:
-            # Check pvp_collection_creators for additional creator addresses
-            try:
-                extra = db.table("pvp_collection_creators") \
-                          .select("creator_address") \
-                          .eq("collection_id", int(coll_id)) \
-                          .execute()
-                creator_addresses = [r["creator_address"] for r in (extra.data or [])]
-                if not creator_addresses:
-                    creator_addresses = [creator]
-            except Exception:
-                creator_addresses = [creator]
-
-            # Fetch ASA IDs from indexer for all creator addresses
-            coll_asa_ids: set = set()
-            for addr in creator_addresses:
-                next_tok2 = None
-                try:
-                    while True:
-                        url2 = f"{indexer_url}/v2/assets?creator={addr}&limit=1000"
-                        if next_tok2:
-                            url2 += f"&next={next_tok2}"
-                        req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req2, timeout=15) as r2:
-                            data2 = _json.loads(r2.read())
-                        for asset in data2.get("assets", []):
-                            coll_asa_ids.add(str(asset.get("index", "")))
-                        next_tok2 = data2.get("next-token")
-                        if not next_tok2:
-                            break
-                except Exception as e:
-                    print(f"[PVP] collection scan failed creator={addr[:8]}...: {e}")
-                    continue
+            # Fast path — use in-memory PARTNER_ASSETS cache (built at startup, refreshed every 4h)
+            coll_asa_ids = PARTNER_ASSETS.get(coll_id, set())
             matched = [asa for asa in held_asa_ids if asa in coll_asa_ids]
 
         if matched:
@@ -1461,6 +1509,7 @@ class PvPCog(commands.Cog):
         self.expire_challenges.start()
         self.daily_leaderboard_post.start()
         self.weekly_pool_reset.start()
+        self.refresh_partner_cache.start()
         self.bot.add_view(JoinBattleView())
 
     def cog_unload(self):
@@ -3276,6 +3325,27 @@ class PvPCog(commands.Cog):
                 )
         except Exception as e:
             print(f"[PVP] deposit notify failed: {e}")
+
+    # ─────────────────────────────────────────
+    # PARTNER ASSETS CACHE REFRESH
+    # ─────────────────────────────────────────
+
+    @tasks.loop(hours=4)
+    async def refresh_partner_cache(self):
+        """Rebuild PARTNER_ASSETS cache every 4 hours."""
+        global PARTNER_ASSETS
+        try:
+            new_cache = await asyncio.to_thread(_build_partner_assets_cache)
+            PARTNER_ASSETS.clear()
+            PARTNER_ASSETS.update(new_cache)
+            total = sum(len(v) for v in PARTNER_ASSETS.values())
+            print(f"[PVP] partner cache refreshed: {len(PARTNER_ASSETS)} collections, {total} total ASAs")
+        except Exception as e:
+            print(f"[PVP] refresh_partner_cache error: {e}")
+
+    @refresh_partner_cache.before_loop
+    async def before_refresh_partner_cache(self):
+        await self.bot.wait_until_ready()
 
     # ─────────────────────────────────────────
     # CHALLENGE EXPIRY LOOP
