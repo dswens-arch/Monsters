@@ -2858,7 +2858,7 @@ class PvPCog(commands.Cog):
                 winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
                 win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
                     total_rounds=result.total_rounds, wager_won=winner_cut,
-                    image_url=winner_m.image_url, is_draw=False, is_algo=(room=="algo"))
+                    image_url=winner_m.image_url, is_draw=False, is_algo=_is_algo_room(room))
             result_buf = await render_result(win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
@@ -2877,7 +2877,8 @@ class PvPCog(commands.Cog):
             prize_str  = f"{winner_cut/1_000_000:g} ALGO" if is_algo else f"{winner_cut:,} $GOO"
             await channel.send(
                 f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
-                + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪")
+                + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪\n"
+                + (f"🏆 +2 ALGO added to the weekly prize pool!" if is_algo else f"🏆 +200 $GOO added to the weekly prize pool!"))
 
     async def _run_board_battle(self, channel, db: object, room: str = "goo",
                                  chal_id: str = "", chal_asa: str = "",
