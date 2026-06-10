@@ -2968,8 +2968,9 @@ class PvPCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         db         = _db()
-        rows       = _get_leaderboard(db, room)
-        pool_bal   = _get_pool_balance(db, room)
+        pool_key   = _pool_room(room)
+        rows       = _get_leaderboard(db, pool_key)
+        pool_bal   = _get_pool_balance(db, pool_key)
         week_start = _current_week_start()
         week_end   = week_start + timedelta(days=7)
         now        = datetime.now(timezone.utc)
@@ -3068,12 +3069,12 @@ class PvPCog(commands.Cog):
                 hours_left = int(((week_end - now).total_seconds() % 86400) / 3600)
 
                 pool_str = (
-                    f"{pool_bal/1_000_000:g} ALGO" if _is_algo_room(room)
+                    f"{pool_bal/1_000_000:g} ALGO" if room == "algo"
                     else f"{pool_bal:,} $GOO"
                 )
 
                 lines = [
-                    f"🏆 **Weekly {'ALGO' if _is_algo_room(room) else 'GOO'} Arena** · "
+                    f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena** · "
                     f"**{pool_str} pot** · winner in {days_left}d {hours_left}h\n"
                 ]
 
