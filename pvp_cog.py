@@ -241,8 +241,13 @@ def _algo_leaderboard_channel_id() -> Optional[int]:
 # DB
 # ─────────────────────────────────────────────
 
+_db_client: Optional[Client] = None
+
 def _db() -> Client:
-    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    global _db_client
+    if _db_client is None:
+        _db_client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    return _db_client
 
 
 # ─────────────────────────────────────────────
