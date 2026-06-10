@@ -2878,7 +2878,7 @@ class PvPCog(commands.Cog):
             await channel.send(
                 f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
                 + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪\n"
-                + (f"🏆 +2 ALGO added to the weekly prize pool!" if is_algo else f"🏆 +200 $GOO added to the weekly prize pool!"))
+                + (f"🏆 +{int(ALGO_WAGER_1V1 * 2 * WEEKLY_RAKE_PCT) / 1_000_000:g} ALGO added to the weekly prize pool!" if is_algo else f"🏆 +{int(GOO_WAGER_1V1 * 2 * WEEKLY_RAKE_PCT):,} $GOO added to the weekly prize pool!"))
 
     async def _run_board_battle(self, channel, db: object, room: str = "goo",
                                  chal_id: str = "", chal_asa: str = "",
