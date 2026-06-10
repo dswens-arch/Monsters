@@ -67,16 +67,41 @@ try:
 except ImportError:
     SKULI_NAME_MAP = {}
 
+try:
+    from algoctopus_image_map import ALGOCTOPUS_IMAGE_MAP
+except ImportError:
+    ALGOCTOPUS_IMAGE_MAP = {}
+
+try:
+    from algoctopus_name_map import ALGOCTOPUS_NAME_MAP
+except ImportError:
+    ALGOCTOPUS_NAME_MAP = {}
+
+try:
+    from blops_image_map import BLOPS_IMAGE_MAP
+except ImportError:
+    BLOPS_IMAGE_MAP = {}
+
+try:
+    from blops_name_map import BLOPS_NAME_MAP
+except ImportError:
+    BLOPS_NAME_MAP = {}
+
 # Map collection_id -> image lookup dict
+# Origin group: AlgOctopus = collection 4, Blops = collection 5
 COLLECTION_IMAGE_MAPS: dict[int, dict] = {
-    2: ZAPPIES_IMAGE_MAP,  # Zappies Reborn
-    3: SKULI_IMAGE_MAP,    # Skuli
+    2: ZAPPIES_IMAGE_MAP,      # Zappies Reborn
+    3: SKULI_IMAGE_MAP,        # Skuli
+    4: ALGOCTOPUS_IMAGE_MAP,   # AlgOctopus (Origin)
+    5: BLOPS_IMAGE_MAP,        # Blops (Origin)
 }
 
 # Map collection_id -> name lookup dict
 COLLECTION_NAME_MAPS: dict[int, dict] = {
-    2: ZAPPIES_NAME_MAP,   # Zappies Reborn
-    3: SKULI_NAME_MAP,     # Skuli
+    2: ZAPPIES_NAME_MAP,       # Zappies Reborn
+    3: SKULI_NAME_MAP,         # Skuli
+    4: ALGOCTOPUS_NAME_MAP,    # AlgOctopus (Origin)
+    5: BLOPS_NAME_MAP,         # Blops (Origin)
 }
 
 # ─────────────────────────────────────────────
