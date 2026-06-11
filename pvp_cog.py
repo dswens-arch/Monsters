@@ -787,12 +787,23 @@ def _add_to_weekly_pool(db, room: str, amount: int) -> None:
     """Credit amount to the active weekly pool for room using atomic SQL increment."""
     week_start = _current_week_start().isoformat()
     try:
-        # Use rpc to atomically increment — avoids race condition on concurrent fights
-        db.rpc("increment_pool_balance", {
-            "p_room":       room,
-            "p_week_start": week_start,
-            "p_amount":     amount,
-        }).execute()
+        row = db.table("pvp_weekly_pools") \
+                .select("id, balance") \
+                .eq("week_start", week_start) \
+                .eq("room", room) \
+                .eq("status", "active") \
+                .execute()
+        if not row.data:
+            print(f"[PVP] _add_to_weekly_pool: no active pool row found room={room} week={week_start}")
+            return
+        pool_id = row.data[0]["id"]
+        current = row.data[0]["balance"]
+        new_bal = current + amount
+        db.table("pvp_weekly_pools") \
+          .update({"balance": new_bal}) \
+          .eq("id", pool_id) \
+          .execute()
+        print(f"[PVP] pool balance updated room={room} {current} -> {new_bal}")
     except Exception as e:
         print(f"[PVP] _add_to_weekly_pool failed room={room}: {e}")
 
