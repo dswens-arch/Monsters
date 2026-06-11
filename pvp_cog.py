@@ -2785,7 +2785,7 @@ class PvPCog(commands.Cog):
             await asyncio.sleep(1.5)
             if r.defender_hp <= 0: break
 
-        wager = GOO_WAGER_1V1
+        wager = ALGO_WAGER_1V1 if _is_algo_room(room) else GOO_WAGER_1V1
         if result.is_draw:
             _refund_wager(db, chal_id, wager, duel_id, "draw")
             _refund_wager(db, opp_id, wager, duel_id, "draw")
