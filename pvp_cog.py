@@ -1311,22 +1311,27 @@ async def _handle_join(interaction: discord.Interaction):
     now = datetime.now(timezone.utc)
     fighter_rows = []
 
+    # Fetch ALL cooldowns for this user in one query instead of N individual calls
+    asa_ids = [r["asa_id"] for r in roster_res.data]
+    cooldown_map: dict[str, datetime] = {}
+    try:
+        cd_res = db.table("pvp_cooldowns")                    .select("asa_id, expires_at")                    .in_("asa_id", asa_ids)                    .execute()
+        for cd in (cd_res.data or []):
+            cooldown_map[cd["asa_id"]] = datetime.fromisoformat(cd["expires_at"])
+    except Exception:
+        pass
+
     for r in roster_res.data:
         asa      = r["asa_id"]
         disabled = False
         suffix   = ""
 
-        # Cooldown check
-        try:
-            cd = db.table("pvp_cooldowns").select("expires_at").eq("asa_id", asa).execute()
-            if cd.data:
-                expires = datetime.fromisoformat(cd.data[0]["expires_at"])
-                if expires > now:
-                    mins     = int((expires - now).total_seconds() / 60) + 1
-                    disabled = True
-                    suffix   = f" ({mins}m)"
-        except Exception:
-            pass
+        # Cooldown check — use pre-fetched map
+        expires = cooldown_map.get(asa)
+        if expires and expires > now:
+            mins     = int((expires - now).total_seconds() / 60) + 1
+            disabled = True
+            suffix   = f" ({mins}m)"
 
         # In-queue check
         if not disabled:
