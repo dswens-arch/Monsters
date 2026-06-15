@@ -2711,32 +2711,27 @@ class PvPCog(commands.Cog):
 
     @discord.app_commands.command(
         name="pvp_backfill_images",
-        description="(Admin) Bulk re-fetch images for all MONSTR roster rows with missing image URLs"
+        description="(Admin) Bulk re-fetch images for all roster rows with missing image URLs"
     )
     @discord.app_commands.default_permissions(administrator=True)
     async def pvp_backfill_images(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
             db = _db()
-            # Find all pvp_rosters rows with empty image_url where collection is MONSTRS
+            # Find ALL roster rows with missing images
             rows = (
                 db.table("pvp_rosters")
-                .select("asa_id, nft_name, pvp_collections(is_monstr)")
+                .select("asa_id, nft_name, collection_id, image_url, pvp_collections(is_monstr)")
                 .execute()
             )
-            # Filter in Python since older supabase-py doesn't support .or_()
-            rows.data = [r for r in (rows.data or []) if not r.get("image_url")]
-            monstr_rows = [
-                r for r in (rows.data or [])
-                if (r.get("pvp_collections") or {}).get("is_monstr", False)
-            ]
-            total = len(monstr_rows)
+            missing_rows = [r for r in (rows.data or []) if not r.get("image_url")]
+            total = len(missing_rows)
             if total == 0:
-                await interaction.followup.send("No MONSTR roster rows with missing images. All good!", ephemeral=True)
+                await interaction.followup.send("No roster rows with missing images. All good!", ephemeral=True)
                 return
 
             await interaction.followup.send(
-                f"Starting backfill for **{total}** MONSTRs with missing images. "
+                f"Starting backfill for **{total}** fighters with missing images. "
                 f"This runs in the background — check Railway logs for progress.",
                 ephemeral=True
             )
@@ -2744,25 +2739,39 @@ class PvPCog(commands.Cog):
             async def _do_backfill():
                 ok = 0
                 fail = 0
-                for r in monstr_rows:
-                    asa_id = r["asa_id"]
+                for r in missing_rows:
+                    asa_id   = r["asa_id"]
+                    coll_id  = r.get("collection_id")
+                    is_monstr = (r.get("pvp_collections") or {}).get("is_monstr", False)
+                    name     = r.get("nft_name", "?")
+                    url      = None
+
                     try:
-                        url = await asyncio.wait_for(
-                            asyncio.to_thread(_resolve_arc19_image_url, asa_id),
-                            timeout=30
-                        )
+                        # Check local image map first (fast, no IPFS call)
+                        image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id or 0), {})
+                        if image_map:
+                            url = image_map.get(str(asa_id))
+
+                        # Fall back to ARC-19 live resolve for MONSTRs and unmapped ARC-19 collections
+                        if not url:
+                            url = await asyncio.wait_for(
+                                asyncio.to_thread(_resolve_arc19_image_url, asa_id),
+                                timeout=30
+                            )
+
                         if url:
                             db.table("pvp_rosters").update({"image_url": url}).eq("asa_id", asa_id).execute()
-                            db.table("monstr_pvp_stats").update({"image_url": url}).eq("asa_id", asa_id).execute()
-                            print(f"[PVP] backfill ok: {r.get('nft_name','?')} ({asa_id})")
+                            if is_monstr:
+                                db.table("monstr_pvp_stats").update({"image_url": url}).eq("asa_id", asa_id).execute()
+                            print(f"[PVP] backfill ok: {name} ({asa_id})")
                             ok += 1
                         else:
-                            print(f"[PVP] backfill no-url: {r.get('nft_name','?')} ({asa_id})")
+                            print(f"[PVP] backfill no-url: {name} ({asa_id})")
                             fail += 1
                     except Exception as e:
-                        print(f"[PVP] backfill failed: {r.get('nft_name','?')} ({asa_id}): {e}")
+                        print(f"[PVP] backfill failed: {name} ({asa_id}): {e}")
                         fail += 1
-                    await asyncio.sleep(1)  # rate-limit IPFS calls
+                    await asyncio.sleep(1)
                 print(f"[PVP] backfill complete: {ok} ok, {fail} failed out of {total}")
 
             asyncio.ensure_future(_do_backfill())
