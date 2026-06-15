@@ -543,7 +543,7 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
             return params_name or f"#{asa_id}", None
 
         metadata = None
-        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
+        for gw in ["https://ipfs.dark-coin.io/ipfs/", "https://ipfs-pera.algonode.dev/ipfs/", "https://ipfs.algonode.xyz/ipfs/", "https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
             try:
                 req2 = urllib.request.Request(
                     f"{gw}{metadata_cid}",
@@ -607,7 +607,7 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
 
         # Step 3: Fetch metadata JSON
         metadata = None
-        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
+        for gw in ["https://ipfs.dark-coin.io/ipfs/", "https://ipfs-pera.algonode.dev/ipfs/", "https://ipfs.algonode.xyz/ipfs/", "https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
             try:
                 req2 = urllib.request.Request(f"{gw}{metadata_cid}",
                     headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
