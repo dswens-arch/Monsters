@@ -87,8 +87,17 @@ try:
 except ImportError:
     BLOPS_NAME_MAP = {}
 
+# Dark Coin Champions (collection 6) — ARC-19, no local image map
+# Images resolved live via _resolve_arc19_image_url at registration
+
+try:
+    from darkcoin_name_map import DARKCOIN_NAME_MAP
+except ImportError:
+    DARKCOIN_NAME_MAP = {}
+
 # Map collection_id -> image lookup dict
 # Origin group: AlgOctopus = collection 4, Blops = collection 5
+# Dark Coin Champions = collection 6 (no image map — ARC-19 live resolve)
 COLLECTION_IMAGE_MAPS: dict[int, dict] = {
     2: ZAPPIES_IMAGE_MAP,      # Zappies Reborn
     3: SKULI_IMAGE_MAP,        # Skuli
@@ -102,6 +111,7 @@ COLLECTION_NAME_MAPS: dict[int, dict] = {
     3: SKULI_NAME_MAP,         # Skuli
     4: ALGOCTOPUS_NAME_MAP,    # AlgOctopus (Origin)
     5: BLOPS_NAME_MAP,         # Blops (Origin)
+    6: DARKCOIN_NAME_MAP,      # Dark Coin Champions
 }
 
 # ─────────────────────────────────────────────
