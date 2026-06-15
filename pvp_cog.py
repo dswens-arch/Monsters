@@ -742,11 +742,13 @@ def _load_stats_from_roster(db, asa_id: str, owner_id: str) -> Optional[MonstrSt
 def _current_week_start() -> datetime:
     """
     Return the start of the current weekly period.
-    Week starts Monday 00:00 UTC (= Sunday 7PM EST).
+    Week resets Sunday 00:00 UTC (= Sunday 7PM EST).
+    We anchor to the most recent Sunday midnight UTC.
     """
     now = datetime.now(timezone.utc)
-    days_since_monday = now.weekday()  # Monday=0
-    week_start = (now - timedelta(days=days_since_monday)).replace(
+    # Sunday = weekday 6
+    days_since_sunday = (now.weekday() + 1) % 7  # Mon=1, Tue=2, ... Sun=0
+    week_start = (now - timedelta(days=days_since_sunday)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     return week_start
@@ -3190,21 +3192,28 @@ class PvPCog(commands.Cog):
                 }).eq("id", pool_id).execute()
 
                 # Format payout string
-                if _is_algo_room(room):
+                is_algo_pool = (room == "algo")
+                if is_algo_pool:
                     prize_str = f"{pool_bal/1_000_000:g} ALGO"
                 else:
                     prize_str = f"{pool_bal:,} $GOO"
 
                 print(f"[PVP] Weekly pool paid room={room} winner={winner_id} amount={prize_str}")
 
-                # Post announcement
+                # Post announcement to leaderboard channel + main channel
+                announcement = (
+                    f"🏆 **Weekly {'ALGO' if is_algo_pool else 'GOO'} Arena — Week Over!**\n\n"
+                    f"Congratulations <@{winner_id}>! 🎉\n"
+                    f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
+                    f"The board resets now. Good luck this week everyone! ⚔️"
+                )
                 if channel:
-                    await channel.send(
-                        f"🏆 **Weekly {'ALGO' if _is_algo_room(room) else 'GOO'} Arena — Week Over!**\n\n"
-                        f"Congratulations <@{winner_id}>! 🎉\n"
-                        f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
-                        f"The board resets now. Good luck this week everyone! ⚔️"
-                    )
+                    await channel.send(announcement)
+                main_ch_id = int(os.environ.get("DISCORD_MAIN_CHANNEL_ID", "0") or "0")
+                if main_ch_id and main_ch_id != (ch_id or 0):
+                    main_ch = self.bot.get_channel(main_ch_id)
+                    if main_ch:
+                        await main_ch.send(announcement)
 
             except Exception as e:
                 print(f"[PVP] Weekly reset failed room={room}: {e}")
