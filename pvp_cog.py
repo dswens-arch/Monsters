@@ -519,11 +519,14 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
     import urllib.request, json as _json
     from encounters import decode_arc19_reserve
 
-    indexer_url = os.environ["INDEXER_URL"]
+    indexer_url   = os.environ["INDEXER_URL"]
+    indexer_token = os.environ.get("INDEXER_TOKEN", "")
     try:
         url = f"{indexer_url}/v2/assets/{asa_id}"
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0", "Accept": "application/json"
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "X-Algo-API-Token": indexer_token,
         })
         with urllib.request.urlopen(req, timeout=10) as r:
             data = _json.loads(r.read())
