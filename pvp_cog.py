@@ -325,14 +325,15 @@ def _deduct(db, user_id: str, amount: int, note: str = "") -> tuple[bool, int]:
 # ─────────────────────────────────────────────
 
 def _log_transaction(db, user_id: str, duel_id: Optional[int], txn_type: str,
-                     amount: int, wallet: str = "", tx_id: str = "", note: str = ""):
+                     amount: int, wallet: str = "", tx_id: str = "", note: str = "",
+                     room: str = "goo"):
     try:
         db.table("pvp_transactions").insert({
             "user_id":        user_id,
             "duel_id":        duel_id,
             "type":           txn_type,
             "amount":         amount,
-            "room":           "goo",
+            "room":           room,
             "wallet_address": wallet,
             "tx_id":          tx_id,
             "note":           note,
@@ -665,6 +666,7 @@ def _credit_algo(db, user_id: str, amount_micro: int, note: str = "") -> int:
             "balance":    new_bal,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }, on_conflict="user_id").execute()
+        _log_transaction(db, user_id, None, "credit", amount_micro, note=note, room="algo")
         return new_bal
     except Exception as e:
         print(f"[PVP] _credit_algo failed: {e}")
@@ -681,6 +683,7 @@ def _deduct_algo(db, user_id: str, amount_micro: int, note: str = "") -> bool:
             "balance":    current - amount_micro,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("user_id", user_id).gte("balance", amount_micro).execute()
+        _log_transaction(db, user_id, None, "deduct", amount_micro, note=note, room="algo")
         return True
     except Exception as e:
         print(f"[PVP] _deduct_algo failed: {e}")
