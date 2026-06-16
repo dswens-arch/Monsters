@@ -2367,7 +2367,7 @@ class PvPCog(commands.Cog):
         if stats and stats.image_url:
             embed.set_thumbnail(url=stats.image_url)
         await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val}")
+        print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val} cost={algo_cost_micro/1_000_000:g} ALGO")
 
     # /pvp_info
     # ─────────────────────────────────────────
@@ -3276,12 +3276,9 @@ class PvPCog(commands.Cog):
         """
         Poll the bot wallet for incoming $GOO transfers and credit
         the sender's PvP balance. Uses pvp_seen_deposits to avoid
-        double-crediting.
-        Only runs while a deposit window is active (set by /pvp_deposit).
+        double-crediting. Runs continuously — no active-window gate —
+        so deposits are never missed regardless of timing.
         """
-        import time
-        if time.time() > self._deposit_active_until:
-            return  # idle — skip this tick
         try:
             await self._process_deposits()
         except Exception as e:
@@ -3296,11 +3293,9 @@ class PvPCog(commands.Cog):
     @tasks.loop(seconds=120)
     async def poll_algo_deposits(self):
         """ALGO deposit detection via algosdk indexer — same approach as GOO poller.
-        Only runs while a deposit window is active (set by /pvp_deposit_algo).
+        Runs continuously — no active-window gate — so deposits are never missed
+        regardless of timing.
         """
-        import time
-        if time.time() > self._deposit_active_until:
-            return  # idle — skip this tick
         try:
             bot_addr = await asyncio.to_thread(_get_bot_address)
             db       = _db()
