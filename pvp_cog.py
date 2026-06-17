@@ -2745,16 +2745,22 @@ class PvPCog(commands.Cog):
             async def _do_backfill():
                 ok = 0
                 fail = 0
+                skipped = 0
                 for r in missing_rows:
                     asa_id   = r["asa_id"]
-                    coll_id  = r.get("collection_id")
+                    coll_id  = int(r.get("collection_id") or 0)
                     is_monstr = (r.get("pvp_collections") or {}).get("is_monstr", False)
                     name     = r.get("nft_name", "?")
                     url      = None
 
+                    # Skip Dark Coin Champions — no working gateway yet, don't burn quota
+                    if coll_id == 6:
+                        skipped += 1
+                        continue
+
                     try:
                         # Check local image map first (fast, no IPFS call)
-                        image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id or 0), {})
+                        image_map = COLLECTION_IMAGE_MAPS.get(coll_id, {})
                         if image_map:
                             url = image_map.get(str(asa_id))
 
@@ -2778,7 +2784,7 @@ class PvPCog(commands.Cog):
                         print(f"[PVP] backfill failed: {name} ({asa_id}): {e}")
                         fail += 1
                     await asyncio.sleep(1)
-                print(f"[PVP] backfill complete: {ok} ok, {fail} failed out of {total}")
+                print(f"[PVP] backfill complete: {ok} ok, {fail} failed, {skipped} skipped (Dark Coin) out of {total}")
 
             asyncio.ensure_future(_do_backfill())
 
