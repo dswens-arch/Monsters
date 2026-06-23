@@ -611,10 +611,13 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
 
         # Step 3: Fetch metadata JSON
         metadata = None
+        _dark_coin_token = os.environ.get("DARK_COIN_IPFS_TOKEN", "")
         for gw in ["https://ipfs.dark-coin.io/ipfs/", "https://ipfs-pera.algonode.dev/ipfs/", "https://ipfs.algonode.xyz/ipfs/", "https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
             try:
-                req2 = urllib.request.Request(f"{gw}{metadata_cid}",
-                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+                _headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+                if "dark-coin.io" in gw and _dark_coin_token:
+                    _headers["Authorization"] = f"Bearer {_dark_coin_token}"
+                req2 = urllib.request.Request(f"{gw}{metadata_cid}", headers=_headers)
                 with urllib.request.urlopen(req2, timeout=10) as r:
                     metadata = _json.loads(r.read())
                 break
@@ -2753,8 +2756,8 @@ class PvPCog(commands.Cog):
                     name     = r.get("nft_name", "?")
                     url      = None
 
-                    # Skip Dark Coin Champions — no working gateway yet, don't burn quota
-                    if coll_id == 6:
+                    # Skip Dark Coin Champions only if no token configured
+                    if coll_id == 6 and not os.environ.get("DARK_COIN_IPFS_TOKEN"):
                         skipped += 1
                         continue
 
