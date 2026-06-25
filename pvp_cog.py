@@ -1245,6 +1245,17 @@ async def _handle_join(interaction: discord.Interaction):
         return
 
     now = datetime.now(timezone.utc)
+
+    # Batch fetch all cooldowns in one query
+    all_asa_ids = [r["asa_id"] for r in roster_res.data]
+    cd_res = await asyncio.to_thread(
+        lambda: db.table("pvp_cooldowns")
+            .select("asa_id, expires_at")
+            .in_("asa_id", all_asa_ids)
+            .execute()
+    )
+    cooldowns = {r["asa_id"]: r["expires_at"] for r in (cd_res.data or [])}
+
     fighter_rows = []
 
     for r in roster_res.data:
@@ -1252,17 +1263,16 @@ async def _handle_join(interaction: discord.Interaction):
         disabled = False
         suffix   = ""
 
-        # Cooldown check
-        try:
-            cd = db.table("pvp_cooldowns").select("expires_at").eq("asa_id", asa).execute()
-            if cd.data:
-                expires = datetime.fromisoformat(cd.data[0]["expires_at"])
+        # Cooldown check from batch
+        if asa in cooldowns:
+            try:
+                expires = datetime.fromisoformat(cooldowns[asa])
                 if expires > now:
                     mins     = int((expires - now).total_seconds() / 60) + 1
                     disabled = True
                     suffix   = f" ({mins}m)"
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # In-queue check — can't queue same fighter in multiple rooms
         if not disabled:
