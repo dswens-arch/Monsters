@@ -847,10 +847,23 @@ def _algo_channel_id() -> Optional[int]:
     return int(val) if val else None
 
 def _channel_room(channel_id: int) -> Optional[str]:
-    """Return 'goo' or 'algo' based on channel."""
-    if channel_id == _pvp_channel_id(): return "goo"
-    if channel_id == _algo_channel_id(): return "algo"
+    """Return 'goo', 'algo', 'goo_beginner', or 'algo_beginner' based on channel."""
+    cid = str(channel_id)
+    goo_ids  = {os.environ.get(k, "") for k in ["DISCORD_GOO_1_CHANNEL_ID", "DISCORD_GOO_2_CHANNEL_ID", "DISCORD_PVP_CHANNEL_ID"]}
+    algo_ids = {os.environ.get(k, "") for k in ["DISCORD_ALGO_1_CHANNEL_ID", "DISCORD_ALGO_2_CHANNEL_ID", "DISCORD_ALGO_CHANNEL_ID"]}
+    goo_beg  = os.environ.get("DISCORD_GOO_BEGINNER_CHANNEL_ID", "")
+    algo_beg = os.environ.get("DISCORD_ALGO_BEGINNER_CHANNEL_ID", "")
+    if cid == goo_beg:   return "goo_beginner"
+    if cid == algo_beg:  return "algo_beginner"
+    if cid in goo_ids:   return "goo"
+    if cid in algo_ids:  return "algo"
     return None
+
+def _is_beginner_room(room: str) -> bool:
+    return "beginner" in room
+
+def _base_room(room: str) -> str:
+    return "algo" if "algo" in room else "goo"
 
 
 
@@ -1170,10 +1183,12 @@ class JoinBattleView(discord.ui.View):
 async def _handle_join(interaction: discord.Interaction):
     """Ephemeral flow triggered when someone taps Join Battle."""
     await interaction.response.defer(ephemeral=True)
-    user_id = str(interaction.user.id)
-    db      = _db()
-    room    = _channel_room(interaction.channel_id) or "goo"
-    board   = _get_board(room)
+    user_id   = str(interaction.user.id)
+    db        = _db()
+    room      = _channel_room(interaction.channel_id) or "goo"
+    base_room = _base_room(room)
+    beginner  = _is_beginner_room(room)
+    board     = _get_board(room)
 
     # Must have a linked wallet
     wallet = await asyncio.to_thread(_get_linked_wallet, user_id)
@@ -1183,7 +1198,7 @@ async def _handle_join(interaction: discord.Interaction):
         return
 
     # Check balance for the right room
-    if room == "algo":
+    if base_room == "algo":
         bal = _get_algo_balance(db, user_id)
         if bal < ALGO_WAGER_1V1:
             await interaction.followup.send(
@@ -1248,6 +1263,12 @@ async def _handle_join(interaction: discord.Interaction):
 
         coll     = r.get("pvp_collections") or {}
         power    = r["attack"] + r["defense"] + r["speed"]
+
+        # Beginner room: only fighters with all stats ≤ 20
+        if beginner and (r["attack"] > 20 or r["defense"] > 20 or r["speed"] > 20):
+            disabled = True
+            suffix   = " (too strong)"
+
         fighter_rows.append({
             "asa_id":         asa,
             "monstr_name":    r["nft_name"] + suffix,
@@ -1263,10 +1284,18 @@ async def _handle_join(interaction: discord.Interaction):
     # Sort: available first by power desc, then disabled by power desc
     fighter_rows.sort(key=lambda r: (r["disabled"], -r["power"]))
 
+    # If in beginner room and all fighters are too strong, give clear message
+    if beginner and all(r["disabled"] for r in fighter_rows):
+        await interaction.followup.send(
+            "⚠️ **Beginner room** — all stats must be **20 or under**.\n"
+            "None of your fighters qualify. Train a fresh fighter to join!",
+            ephemeral=True)
+        return
+
     async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
         await _on_fighter_picked(pick_interaction, asa_id, user_id, db, room)
 
-    currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
+    currency = f"{bal/1_000_000:g} ALGO" if base_room == "algo" else f"{bal:,} $GOO"
     view, content = _build_collection_picker(fighter_rows, on_pick, "Choose your fighter")
     await interaction.followup.send(
         f"{content}\n({currency} available)",
@@ -1330,14 +1359,14 @@ async def _on_fighter_picked(interaction: discord.Interaction,
 
     if board.is_empty:
         # Lock wager immediately on join
-        wager = ALGO_WAGER_1V1 if room == "algo" else GOO_WAGER_1V1
-        if room == "algo":
+        wager = ALGO_WAGER_1V1 if _base_room(room) == "algo" else GOO_WAGER_1V1
+        if _base_room(room) == "algo":
             locked = await asyncio.to_thread(_deduct_algo, db, user_id, wager, "wager hold — waiting for opponent")
         else:
             locked, _ = await asyncio.to_thread(_deduct, db, user_id, wager, "wager hold — waiting for opponent")
         if not locked:
-            wager_str   = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
-            deposit_cmd = "`/pvp_deposit_algo`" if room == "algo" else "`/pvp_deposit`"
+            wager_str   = f"{wager/1_000_000:g} ALGO" if _base_room(room) == "algo" else f"{wager:,} $GOO"
+            deposit_cmd = "`/pvp_deposit_algo`" if _base_room(room) == "algo" else "`/pvp_deposit`"
             await interaction.followup.send(
                 f"❌ Not enough funds. Need **{wager_str}** to join. Use {deposit_cmd}.",
                 ephemeral=True)
@@ -1351,7 +1380,7 @@ async def _on_fighter_picked(interaction: discord.Interaction,
             "room":     room,
             "wager":    wager,
         }
-        wager_str = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
+        wager_str = f"{wager/1_000_000:g} ALGO" if _base_room(room) == "algo" else f"{wager:,} $GOO"
         await interaction.followup.send(
             f"**{stats.name}** is in the arena! **{wager_str}** held. Waiting for an opponent...",
             ephemeral=True)
@@ -1507,12 +1536,16 @@ class PvPCog(commands.Cog):
 
     async def _reload_boards(self):
         """Re-attach JoinBattleView to stored board messages on startup."""
-        await asyncio.sleep(3)  # give bot time to fully connect
+        await asyncio.sleep(3)
         try:
             db = _db()
             for room, board, env_key in [
-                ("goo",  _board,      "DISCORD_PVP_CHANNEL_ID"),
-                ("algo", _board_algo, "DISCORD_ALGO_CHANNEL_ID"),
+                ("goo",           _board,      "DISCORD_GOO_1_CHANNEL_ID"),
+                ("goo_2",         _board,      "DISCORD_GOO_2_CHANNEL_ID"),
+                ("goo_beginner",  _board,      "DISCORD_GOO_BEGINNER_CHANNEL_ID"),
+                ("algo",          _board_algo, "DISCORD_ALGO_1_CHANNEL_ID"),
+                ("algo_2",        _board_algo, "DISCORD_ALGO_2_CHANNEL_ID"),
+                ("algo_beginner", _board_algo, "DISCORD_ALGO_BEGINNER_CHANNEL_ID"),
             ]:
                 ch_val = os.environ.get(env_key, "")
                 if not ch_val.strip().isdigit():
@@ -2649,7 +2682,7 @@ class PvPCog(commands.Cog):
             except Exception as e: print(f"[PVP] DB draw failed: {e}")
         else:
             winner_id  = result.winner_owner
-            is_algo    = room == "algo"
+            is_algo    = _base_room(room) == "algo"
             winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
             treasury   = ALGO_TREASURY   if is_algo else GOO_TREASURY_1V1
             if is_algo:
@@ -2681,7 +2714,7 @@ class PvPCog(commands.Cog):
                 wager_total = wager * 2   # both players contributed
                 rake_amount = int(wager_total * WEEKLY_RAKE_PCT)
                 _ensure_weekly_pools(db)
-                _add_to_weekly_pool(db, room, rake_amount)
+                _add_to_weekly_pool(db, _base_room(room), rake_amount)
                 print(f"[PVP] Weekly pool +{rake_amount} ({room}) duel#{duel_id}")
             except Exception as e:
                 print(f"[PVP] weekly pool rake failed duel#{duel_id}: {e}")
@@ -2689,8 +2722,8 @@ class PvPCog(commands.Cog):
             # ── Weekly leaderboard ────────────────────────────────────────
             loser_id = opp_id if winner_id == chal_id else chal_id
             try:
-                _upsert_leaderboard(db, winner_id, room, won=True)
-                _upsert_leaderboard(db, loser_id,  room, won=False)
+                _upsert_leaderboard(db, winner_id, _base_room(room), won=True)
+                _upsert_leaderboard(db, loser_id,  _base_room(room), won=False)
             except Exception as e:
                 print(f"[PVP] leaderboard upsert failed duel#{duel_id}: {e}")
 
@@ -2701,11 +2734,11 @@ class PvPCog(commands.Cog):
             else:
                 winner_m   = a if result.winner_asa == a.asa_id else b
                 winner_uname = await _get_display_name(channel.guild, winner_m.owner_id)
-                is_algo    = room == "algo"
+                is_algo    = _base_room(room) == "algo"
                 winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
                 win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
                     total_rounds=result.total_rounds, wager_won=winner_cut,
-                    image_url=winner_m.image_url, is_draw=False, is_algo=(room=="algo"))
+                    image_url=winner_m.image_url, is_draw=False, is_algo=(_base_room(room)=="algo"))
             result_buf = await render_result(win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
@@ -2719,7 +2752,7 @@ class PvPCog(commands.Cog):
         else:
             winner_m   = a if result.winner_asa == a.asa_id else b
             loser_m    = b if result.winner_asa == a.asa_id else a
-            is_algo    = room == "algo"
+            is_algo    = _base_room(room) == "algo"
             winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
             prize_str  = f"{winner_cut/1_000_000:g} ALGO" if is_algo else f"{winner_cut:,} $GOO"
             await channel.send(
