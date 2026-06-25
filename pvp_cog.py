@@ -790,13 +790,13 @@ def _get_leaderboard(db, room: str) -> list[dict]:
 
 def _get_pool_balance(db, room: str) -> int:
     """Return current active pool balance for room."""
-    week_start = _current_week_start().isoformat()
     try:
         row = db.table("pvp_weekly_pools") \
                 .select("balance") \
-                .eq("week_start", week_start) \
                 .eq("room", room) \
                 .eq("status", "active") \
+                .order("id", desc=True) \
+                .limit(1) \
                 .execute()
         return row.data[0]["balance"] if row.data else 0
     except Exception:
