@@ -87,12 +87,12 @@ from pvp_board_result import WinnerInfo, render_result
 # ─────────────────────────────────────────────
 
 GOO_WAGER_1V1      = 500        # per player
-GOO_WINNER_CUT_1V1 = 900        # winner receives (out of 1000 pot)
-GOO_TREASURY_1V1   = 100        # stays in bot wallet as treasury
+GOO_WINNER_CUT_1V1 = 800        # winner receives (out of 1000 pot, 20% goes to weekly pool)
+GOO_TREASURY_1V1   = 0          # no treasury cut, rake goes to weekly pool
 
 ALGO_WAGER_1V1     = 5_000_000  # 5 ALGO in microALGO
-ALGO_WINNER_CUT    = 9_000_000  # 9 ALGO to winner
-ALGO_TREASURY      = 1_000_000  # 1 ALGO treasury
+ALGO_WINNER_CUT    = 8_000_000  # 8 ALGO to winner (10 ALGO pot minus 20% rake)
+ALGO_TREASURY      = 0          # no treasury cut, rake goes to weekly pool
 
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 60       # how often to check for new deposits
@@ -114,6 +114,23 @@ def _goo_leaderboard_channel_id() -> Optional[int]:
 def _algo_leaderboard_channel_id() -> Optional[int]:
     val = os.environ.get("DISCORD_ALGO_CHANNEL_ID", "")
     return int(val) if val else None
+
+def _weirdo_role_id() -> Optional[int]:
+    val = os.environ.get("DISCORD_WEIRDO_ROLE_ID", "")
+    return int(val) if val else None
+
+def _challenger_role_id() -> Optional[int]:
+    val = os.environ.get("DISCORD_CHALLENGER_ROLE_ID", "")
+    return int(val) if val else None
+
+def _role_ping_str() -> str:
+    """Returns a string pinging both Weirdo and Challenger roles if set."""
+    parts = []
+    w = _weirdo_role_id()
+    c = _challenger_role_id()
+    if w: parts.append(f"<@&{w}>")
+    if c: parts.append(f"<@&{c}>")
+    return " ".join(parts)
 
 
 # ─────────────────────────────────────────────
@@ -659,9 +676,7 @@ def _current_week_start() -> datetime:
 def _ensure_weekly_pools(db) -> None:
     """
     Make sure active pool rows exist for the current week.
-    Safe to call on every battle — no-ops if rows already exist.
-    Handles the case where a paid row exists for the same week_start
-    (e.g. pot was paid out same day it started) by using a later start time.
+    Safe to call on every battle — no-ops if active rows exist.
     """
     week_start = _current_week_start()
     week_end   = week_start + timedelta(days=7)
@@ -670,45 +685,25 @@ def _ensure_weekly_pools(db) -> None:
 
     for room in ("goo", "algo"):
         try:
-            # Check for active row first
+            # Check for ANY active row for this room
             active = db.table("pvp_weekly_pools") \
                        .select("id") \
-                       .eq("week_start", ws) \
                        .eq("room", room) \
                        .eq("status", "active") \
                        .execute()
             if active.data:
                 continue  # already exists, nothing to do
 
-            # Check if a paid row exists for this week_start
-            paid = db.table("pvp_weekly_pools") \
-                     .select("id") \
-                     .eq("week_start", ws) \
-                     .eq("room", room) \
-                     .eq("status", "paid") \
-                     .execute()
-
-            if paid.data:
-                # Paid row exists for this week_start — use now() as a unique start
-                # so the new active row doesn't conflict
-                now_iso = datetime.now(timezone.utc).isoformat()
-                db.table("pvp_weekly_pools").insert({
-                    "week_start": now_iso,
-                    "week_end":   we,
-                    "room":       room,
-                    "balance":    0,
-                    "status":     "active",
-                }).execute()
-                print(f"[PVP] Created replacement weekly pool {room} (paid row existed)")
-            else:
-                db.table("pvp_weekly_pools").insert({
-                    "week_start": ws,
-                    "week_end":   we,
-                    "room":       room,
-                    "balance":    0,
-                    "status":     "active",
-                }).execute()
-                print(f"[PVP] Created weekly pool {room} week={ws[:10]}")
+            # No active row — create one, using now() to avoid unique constraint conflicts
+            now_iso = datetime.now(timezone.utc).isoformat()
+            db.table("pvp_weekly_pools").insert({
+                "week_start": now_iso,
+                "week_end":   we,
+                "room":       room,
+                "balance":    0,
+                "status":     "active",
+            }).execute()
+            print(f"[PVP] Created weekly pool {room}")
         except Exception as e:
             print(f"[PVP] _ensure_weekly_pools failed room={room}: {e}")
 
@@ -2950,7 +2945,8 @@ class PvPCog(commands.Cog):
                     if len(rows) > 3:
                         lines.append(f"\n*Use `/pvp_leaderboard` to see the full top 10.*")
 
-                await channel.send("\n".join(lines))
+                ping = _role_ping_str()
+                await channel.send(("\n".join(lines) + (f"\n{ping}" if ping else "")))
                 print(f"[PVP] Daily leaderboard posted room={room}")
             except Exception as e:
                 print(f"[PVP] daily_leaderboard_post failed room={room}: {e}")
@@ -2994,12 +2990,14 @@ class PvPCog(commands.Cog):
             channel = self.bot.get_channel(ch_id) if ch_id else None
 
             try:
-                # Get pool
+                # Get pool — find most recent active row (don't filter by week_start
+                # since it may have been created with now() if a conflict occurred)
                 pool_row = db.table("pvp_weekly_pools") \
                              .select("id, balance") \
-                             .eq("week_start", week_start.isoformat()) \
                              .eq("room", room) \
                              .eq("status", "active") \
+                             .order("id", desc=True) \
+                             .limit(1) \
                              .execute()
                 if not pool_row.data or pool_row.data[0]["balance"] == 0:
                     print(f"[PVP] Weekly reset: no active pool for {room}, skipping")
@@ -3017,11 +3015,28 @@ class PvPCog(commands.Cog):
                 winner_id   = lb_rows[0]["user_id"]
                 winner_wins = lb_rows[0]["wins"]
 
-                # Credit winner
-                if room == "algo":
-                    credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
-                else:
-                    credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
+                # Get winner's linked wallet for on-chain payout
+                wallet_row = db.table("linked_wallets").select("wallet_address") \
+                               .eq("user_id", winner_id).execute()
+                winner_wallet = wallet_row.data[0]["wallet_address"] if wallet_row.data else None
+
+                # Credit custodial balance
+                credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
+
+                # On-chain payout
+                if winner_wallet:
+                    try:
+                        if room == "algo":
+                            # ALGO on-chain transfer
+                            from encounters import send_algo
+                            await asyncio.to_thread(send_algo, winner_wallet, pool_bal)
+                            print(f"[PVP] Weekly ALGO sent on-chain to {winner_wallet[:8]}...")
+                        else:
+                            # GOO on-chain transfer
+                            await asyncio.to_thread(send_goo, winner_wallet, pool_bal)
+                            print(f"[PVP] Weekly GOO sent on-chain to {winner_wallet[:8]}...")
+                    except Exception as e:
+                        print(f"[PVP] Weekly on-chain payout failed: {e}")
 
                 # Mark pool as paid
                 db.table("pvp_weekly_pools").update({
@@ -3038,9 +3053,11 @@ class PvPCog(commands.Cog):
 
                 print(f"[PVP] Weekly pool paid room={room} winner={winner_id} amount={prize_str}")
 
-                # Post announcement
+                # Post announcement with role pings
                 if channel:
+                    ping = _role_ping_str()
                     await channel.send(
+                        f"{ping}\n" if ping else "" +
                         f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena — Week Over!**\n\n"
                         f"Congratulations <@{winner_id}>! 🎉\n"
                         f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
