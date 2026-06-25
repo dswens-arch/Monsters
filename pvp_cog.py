@@ -67,131 +67,17 @@ try:
 except ImportError:
     SKULI_NAME_MAP = {}
 
-try:
-    from algoctopus_image_map import ALGOCTOPUS_IMAGE_MAP
-except ImportError:
-    ALGOCTOPUS_IMAGE_MAP = {}
-
-try:
-    from algoctopus_name_map import ALGOCTOPUS_NAME_MAP
-except ImportError:
-    ALGOCTOPUS_NAME_MAP = {}
-
-try:
-    from blops_image_map import BLOPS_IMAGE_MAP
-except ImportError:
-    BLOPS_IMAGE_MAP = {}
-
-try:
-    from blops_name_map import BLOPS_NAME_MAP
-except ImportError:
-    BLOPS_NAME_MAP = {}
-
-try:
-    from darkcoin_image_map import DARKCOIN_IMAGE_MAP
-except ImportError:
-    DARKCOIN_IMAGE_MAP = {}
-
-try:
-    from darkcoin_name_map import DARKCOIN_NAME_MAP
-except ImportError:
-    DARKCOIN_NAME_MAP = {}
-
 # Map collection_id -> image lookup dict
 COLLECTION_IMAGE_MAPS: dict[int, dict] = {
-    2: ZAPPIES_IMAGE_MAP,      # Zappies Reborn
-    3: SKULI_IMAGE_MAP,        # Skuli
-    4: ALGOCTOPUS_IMAGE_MAP,   # AlgOctopus (Origin)
-    5: BLOPS_IMAGE_MAP,        # Blops (Origin)
-    6: DARKCOIN_IMAGE_MAP,     # Dark Coin Champions
+    2: ZAPPIES_IMAGE_MAP,  # Zappies Reborn
+    3: SKULI_IMAGE_MAP,    # Skuli
 }
 
 # Map collection_id -> name lookup dict
 COLLECTION_NAME_MAPS: dict[int, dict] = {
-    2: ZAPPIES_NAME_MAP,       # Zappies Reborn
-    3: SKULI_NAME_MAP,         # Skuli
-    4: ALGOCTOPUS_NAME_MAP,    # AlgOctopus (Origin)
-    5: BLOPS_NAME_MAP,         # Blops (Origin)
-    6: DARKCOIN_NAME_MAP,      # Dark Coin Champions
+    2: ZAPPIES_NAME_MAP,   # Zappies Reborn
+    3: SKULI_NAME_MAP,     # Skuli
 }
-
-# ─────────────────────────────────────────────
-# PARTNER ASSETS CACHE
-# {collection_id_str: set(asa_id_str, ...)}
-# Loaded at startup and refreshed every 4 hours so join is fast.
-# ─────────────────────────────────────────────
-PARTNER_ASSETS: dict[str, set] = {}
-
-
-def _build_partner_assets_cache() -> dict[str, set]:
-    """
-    Build PARTNER_ASSETS from COLLECTION_IMAGE_MAPS keys (Zappies, Skuli, etc).
-    These maps are already loaded from CSV so no indexer calls needed.
-    Falls back to indexer scan for any partner collection not in a local image map.
-    """
-    import urllib.request, json as _json
-
-    cache: dict[str, set] = {}
-    db = _db()
-
-    try:
-        colls = db.table("pvp_collections").select("*").eq("active", True).execute()
-        collections = colls.data or []
-    except Exception as e:
-        print(f"[PVP] partner cache: pvp_collections fetch failed: {e}")
-        return cache
-
-    indexer_url = os.environ.get("INDEXER_URL", "")
-
-    for coll in collections:
-        coll_id   = str(coll["id"])
-        is_monstr = coll.get("is_monstr", False)
-        if is_monstr:
-            continue  # MONSTR_ASSETS handles this
-
-        # Fast path — use local image map keys if available
-        image_map = COLLECTION_IMAGE_MAPS.get(int(coll_id))
-        if image_map:
-            cache[coll_id] = set(image_map.keys())
-            print(f"[PVP] partner cache: collection {coll_id} loaded {len(cache[coll_id])} ASAs from image map")
-            continue
-
-        # Fallback — scan indexer by creator address
-        try:
-            extra = db.table("pvp_collection_creators") \
-                      .select("creator_address") \
-                      .eq("collection_id", int(coll_id)) \
-                      .execute()
-            creator_addresses = [r["creator_address"] for r in (extra.data or [])]
-            if not creator_addresses:
-                creator_addresses = [coll["creator_address"]]
-        except Exception:
-            creator_addresses = [coll["creator_address"]]
-
-        coll_asa_ids: set = set()
-        for addr in creator_addresses:
-            next_tok = None
-            try:
-                while True:
-                    url = f"{indexer_url}/v2/assets?creator={addr}&limit=1000"
-                    if next_tok:
-                        url += f"&next={next_tok}"
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        data = _json.loads(r.read())
-                    for asset in data.get("assets", []):
-                        coll_asa_ids.add(str(asset.get("index", "")))
-                    next_tok = data.get("next-token")
-                    if not next_tok:
-                        break
-            except Exception as e:
-                print(f"[PVP] partner cache: indexer scan failed creator={addr[:8]}...: {e}")
-
-        if coll_asa_ids:
-            cache[coll_id] = coll_asa_ids
-            print(f"[PVP] partner cache: collection {coll_id} loaded {len(coll_asa_ids)} ASAs via indexer")
-
-    return cache
 from pvp_board import BoardPlayer, render_board
 from pvp_board_result import WinnerInfo, render_result
 
@@ -200,31 +86,13 @@ from pvp_board_result import WinnerInfo, render_result
 # CONFIG
 # ─────────────────────────────────────────────
 
-GOO_WAGER_1V1      = 500        # per player (all GOO rooms)
-GOO_WINNER_CUT_1V1 = 800        # winner receives (out of 1000 pot, 200 rake)
-GOO_TREASURY_1V1   = 0          # no treasury cut — rake goes to weekly pool
+GOO_WAGER_1V1      = 500        # per player
+GOO_WINNER_CUT_1V1 = 900        # winner receives (out of 1000 pot)
+GOO_TREASURY_1V1   = 100        # stays in bot wallet as treasury
 
-ALGO_WAGER_1V1     = 5_000_000  # 5 ALGO in microALGO (all ALGO rooms)
-ALGO_WINNER_CUT    = 8_000_000  # 8 ALGO to winner (out of 10 ALGO pot, 2 ALGO rake)
-ALGO_TREASURY      = 0          # no treasury cut — rake goes to weekly pool
-
-# Beginner room stat gate — locked out once ALL stats >= this value
-BEGINNER_STAT_MAX  = 20
-
-# Room definitions
-GOO_ROOMS  = ("goo_1", "goo_2", "goo_beginner")
-ALGO_ROOMS = ("algo_1", "algo_2", "algo_beginner")
-ALL_ROOMS  = GOO_ROOMS + ALGO_ROOMS
-
-# Env var for each room's channel ID
-ROOM_CHANNEL_ENV = {
-    "goo_1":          "DISCORD_GOO_1_CHANNEL_ID",
-    "goo_2":          "DISCORD_GOO_2_CHANNEL_ID",
-    "goo_beginner":   "DISCORD_GOO_BEGINNER_CHANNEL_ID",
-    "algo_1":         "DISCORD_ALGO_1_CHANNEL_ID",
-    "algo_2":         "DISCORD_ALGO_2_CHANNEL_ID",
-    "algo_beginner":  "DISCORD_ALGO_BEGINNER_CHANNEL_ID",
-}
+ALGO_WAGER_1V1     = 5_000_000  # 5 ALGO in microALGO
+ALGO_WINNER_CUT    = 9_000_000  # 9 ALGO to winner
+ALGO_TREASURY      = 1_000_000  # 1 ALGO treasury
 
 CHALLENGE_TTL_HOURS = 24
 DEPOSIT_POLL_SECONDS = 60       # how often to check for new deposits
@@ -240,25 +108,20 @@ WEEKLY_RESET_MINUTE   = 0
 
 # Channel IDs for daily leaderboard posts — set as env vars
 def _goo_leaderboard_channel_id() -> Optional[int]:
-    """Post GOO leaderboard to goo_1 channel."""
-    return _room_channel_id("goo_1")
+    val = os.environ.get("DISCORD_PVP_CHANNEL_ID", "")
+    return int(val) if val else None
 
 def _algo_leaderboard_channel_id() -> Optional[int]:
-    """Post ALGO leaderboard to algo_1 channel."""
-    return _room_channel_id("algo_1")
+    val = os.environ.get("DISCORD_ALGO_CHANNEL_ID", "")
+    return int(val) if val else None
 
 
 # ─────────────────────────────────────────────
 # DB
 # ─────────────────────────────────────────────
 
-_db_client: Optional[Client] = None
-
 def _db() -> Client:
-    global _db_client
-    if _db_client is None:
-        _db_client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-    return _db_client
+    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
 # ─────────────────────────────────────────────
@@ -326,15 +189,14 @@ def _deduct(db, user_id: str, amount: int, note: str = "") -> tuple[bool, int]:
 # ─────────────────────────────────────────────
 
 def _log_transaction(db, user_id: str, duel_id: Optional[int], txn_type: str,
-                     amount: int, wallet: str = "", tx_id: str = "", note: str = "",
-                     room: str = "goo"):
+                     amount: int, wallet: str = "", tx_id: str = "", note: str = ""):
     try:
         db.table("pvp_transactions").insert({
             "user_id":        user_id,
             "duel_id":        duel_id,
             "type":           txn_type,
             "amount":         amount,
-            "room":           room,
+            "room":           "goo",
             "wallet_address": wallet,
             "tx_id":          tx_id,
             "note":           note,
@@ -501,8 +363,38 @@ def _fetch_all_eligible_asa_ids(wallet_address: str) -> dict:
             # Fast path — use in-memory registry, no extra indexer call
             matched = [asa for asa in held_asa_ids if asa in MONSTR_ASSETS]
         else:
-            # Fast path — use in-memory PARTNER_ASSETS cache (built at startup, refreshed every 4h)
-            coll_asa_ids = PARTNER_ASSETS.get(coll_id, set())
+            # Check pvp_collection_creators for additional creator addresses
+            try:
+                extra = db.table("pvp_collection_creators") \
+                          .select("creator_address") \
+                          .eq("collection_id", int(coll_id)) \
+                          .execute()
+                creator_addresses = [r["creator_address"] for r in (extra.data or [])]
+                if not creator_addresses:
+                    creator_addresses = [creator]
+            except Exception:
+                creator_addresses = [creator]
+
+            # Fetch ASA IDs from indexer for all creator addresses
+            coll_asa_ids: set = set()
+            for addr in creator_addresses:
+                next_tok2 = None
+                try:
+                    while True:
+                        url2 = f"{indexer_url}/v2/assets?creator={addr}&limit=1000"
+                        if next_tok2:
+                            url2 += f"&next={next_tok2}"
+                        req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req2, timeout=15) as r2:
+                            data2 = _json.loads(r2.read())
+                        for asset in data2.get("assets", []):
+                            coll_asa_ids.add(str(asset.get("index", "")))
+                        next_tok2 = data2.get("next-token")
+                        if not next_tok2:
+                            break
+                except Exception as e:
+                    print(f"[PVP] collection scan failed creator={addr[:8]}...: {e}")
+                    continue
             matched = [asa for asa in held_asa_ids if asa in coll_asa_ids]
 
         if matched:
@@ -521,14 +413,11 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
     import urllib.request, json as _json
     from encounters import decode_arc19_reserve
 
-    indexer_url   = os.environ["INDEXER_URL"]
-    indexer_token = os.environ.get("INDEXER_TOKEN", "")
+    indexer_url = os.environ["INDEXER_URL"]
     try:
         url = f"{indexer_url}/v2/assets/{asa_id}"
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "X-Algo-API-Token": indexer_token,
+            "User-Agent": "Mozilla/5.0", "Accept": "application/json"
         })
         with urllib.request.urlopen(req, timeout=10) as r:
             data = _json.loads(r.read())
@@ -548,7 +437,7 @@ def _resolve_arc19_name_and_image(asa_id: str) -> tuple:
             return params_name or f"#{asa_id}", None
 
         metadata = None
-        for gw in ["https://ipfs.dark-coin.io/ipfs/", "https://ipfs-pera.algonode.dev/ipfs/", "https://ipfs.algonode.xyz/ipfs/", "https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
+        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
             try:
                 req2 = urllib.request.Request(
                     f"{gw}{metadata_cid}",
@@ -612,13 +501,10 @@ def _resolve_arc19_image_url(asa_id: str) -> Optional[str]:
 
         # Step 3: Fetch metadata JSON
         metadata = None
-        _dark_coin_token = os.environ.get("DARK_COIN_IPFS_TOKEN", "")
-        for gw in ["https://ipfs.dark-coin.io/ipfs/", "https://ipfs-pera.algonode.dev/ipfs/", "https://ipfs.algonode.xyz/ipfs/", "https://dweb.link/ipfs/", "https://ipfs.io/ipfs/"]:
+        for gw in ["https://dweb.link/ipfs/", "https://ipfs.io/ipfs/", "https://ipfs.algonode.xyz/ipfs/"]:
             try:
-                _headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-                if "dark-coin.io" in gw and _dark_coin_token:
-                    _headers["Authorization"] = f"Bearer {_dark_coin_token}"
-                req2 = urllib.request.Request(f"{gw}{metadata_cid}", headers=_headers)
+                req2 = urllib.request.Request(f"{gw}{metadata_cid}",
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
                 with urllib.request.urlopen(req2, timeout=10) as r:
                     metadata = _json.loads(r.read())
                 break
@@ -670,7 +556,6 @@ def _credit_algo(db, user_id: str, amount_micro: int, note: str = "") -> int:
             "balance":    new_bal,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }, on_conflict="user_id").execute()
-        _log_transaction(db, user_id, None, "credit", amount_micro, note=note, room="algo")
         return new_bal
     except Exception as e:
         print(f"[PVP] _credit_algo failed: {e}")
@@ -687,7 +572,6 @@ def _deduct_algo(db, user_id: str, amount_micro: int, note: str = "") -> bool:
             "balance":    current - amount_micro,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("user_id", user_id).gte("balance", amount_micro).execute()
-        _log_transaction(db, user_id, None, "deduct", amount_micro, note=note, room="algo")
         return True
     except Exception as e:
         print(f"[PVP] _deduct_algo failed: {e}")
@@ -762,13 +646,11 @@ def _load_stats_from_roster(db, asa_id: str, owner_id: str) -> Optional[MonstrSt
 def _current_week_start() -> datetime:
     """
     Return the start of the current weekly period.
-    Week resets Sunday 00:00 UTC (= Sunday 7PM EST).
-    We anchor to the most recent Sunday midnight UTC.
+    Week starts Monday 00:00 UTC (= Sunday 7PM EST).
     """
     now = datetime.now(timezone.utc)
-    # Sunday = weekday 6
-    days_since_sunday = (now.weekday() + 1) % 7  # Mon=1, Tue=2, ... Sun=0
-    week_start = (now - timedelta(days=days_since_sunday)).replace(
+    days_since_monday = now.weekday()  # Monday=0
+    week_start = (now - timedelta(days=days_since_monday)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     return week_start
@@ -778,6 +660,8 @@ def _ensure_weekly_pools(db) -> None:
     """
     Make sure active pool rows exist for the current week.
     Safe to call on every battle — no-ops if rows already exist.
+    Handles the case where a paid row exists for the same week_start
+    (e.g. pot was paid out same day it started) by using a later start time.
     """
     week_start = _current_week_start()
     week_end   = week_start + timedelta(days=7)
@@ -786,13 +670,37 @@ def _ensure_weekly_pools(db) -> None:
 
     for room in ("goo", "algo"):
         try:
-            existing = db.table("pvp_weekly_pools") \
-                         .select("id") \
-                         .eq("week_start", ws) \
-                         .eq("room", room) \
-                         .eq("status", "active") \
-                         .execute()
-            if not existing.data:
+            # Check for active row first
+            active = db.table("pvp_weekly_pools") \
+                       .select("id") \
+                       .eq("week_start", ws) \
+                       .eq("room", room) \
+                       .eq("status", "active") \
+                       .execute()
+            if active.data:
+                continue  # already exists, nothing to do
+
+            # Check if a paid row exists for this week_start
+            paid = db.table("pvp_weekly_pools") \
+                     .select("id") \
+                     .eq("week_start", ws) \
+                     .eq("room", room) \
+                     .eq("status", "paid") \
+                     .execute()
+
+            if paid.data:
+                # Paid row exists for this week_start — use now() as a unique start
+                # so the new active row doesn't conflict
+                now_iso = datetime.now(timezone.utc).isoformat()
+                db.table("pvp_weekly_pools").insert({
+                    "week_start": now_iso,
+                    "week_end":   we,
+                    "room":       room,
+                    "balance":    0,
+                    "status":     "active",
+                }).execute()
+                print(f"[PVP] Created replacement weekly pool {room} (paid row existed)")
+            else:
                 db.table("pvp_weekly_pools").insert({
                     "week_start": ws,
                     "week_end":   we,
@@ -806,26 +714,25 @@ def _ensure_weekly_pools(db) -> None:
 
 
 def _add_to_weekly_pool(db, room: str, amount: int) -> None:
-    """Credit amount to the active weekly pool for room using atomic SQL increment."""
-    week_start = _current_week_start().isoformat()
+    """Credit amount to the active weekly pool for room."""
     try:
+        # Find the active pool — don't filter by week_start since it may
+        # have been created with now() if a paid row existed for the week
         row = db.table("pvp_weekly_pools") \
                 .select("id, balance") \
-                .eq("week_start", week_start) \
                 .eq("room", room) \
                 .eq("status", "active") \
+                .order("id", desc=True) \
+                .limit(1) \
                 .execute()
         if not row.data:
-            print(f"[PVP] _add_to_weekly_pool: no active pool row found room={room} week={week_start}")
+            print(f"[PVP] _add_to_weekly_pool: no active pool row found room={room}")
             return
-        pool_id = row.data[0]["id"]
-        current = row.data[0]["balance"]
-        new_bal = current + amount
+        new_bal = row.data[0]["balance"] + amount
         db.table("pvp_weekly_pools") \
           .update({"balance": new_bal}) \
-          .eq("id", pool_id) \
+          .eq("id", row.data[0]["id"]) \
           .execute()
-        print(f"[PVP] pool balance updated room={room} {current} -> {new_bal}")
     except Exception as e:
         print(f"[PVP] _add_to_weekly_pool failed room={room}: {e}")
 
@@ -936,45 +843,30 @@ async def _get_display_name(guild, user_id: str) -> str:
 # CHANNEL GUARD
 # ─────────────────────────────────────────────
 
-def _room_channel_id(room: str) -> Optional[int]:
-    """Return the Discord channel ID for a given room."""
-    val = os.environ.get(ROOM_CHANNEL_ENV.get(room, ""), "")
-    return int(val) if val and val.strip().isdigit() else None
-
-def _channel_room(channel_id: int) -> Optional[str]:
-    """Return room key (e.g. 'goo_1', 'algo_beginner') based on channel ID."""
-    for room in ALL_ROOMS:
-        if channel_id == _room_channel_id(room):
-            return room
-    return None
-
-def _is_algo_room(room: str) -> bool:
-    return room in ALGO_ROOMS
-
-def _is_beginner_room(room: str) -> bool:
-    return room.endswith("_beginner")
-
-def _pool_room(room: str) -> str:
-    """Map any room to its shared weekly pool key ('goo' or 'algo')."""
-    return "algo" if _is_algo_room(room) else "goo"
-
 def _pvp_channel_id() -> Optional[int]:
-    """Legacy helper — returns goo_1 channel."""
-    return _room_channel_id("goo_1")
+    val = os.environ.get("DISCORD_PVP_CHANNEL_ID", "")
+    return int(val) if val else None
 
 def _algo_channel_id() -> Optional[int]:
-    """Legacy helper — returns algo_1 channel."""
-    return _room_channel_id("algo_1")
+    val = os.environ.get("DISCORD_ALGO_CHANNEL_ID", "")
+    return int(val) if val else None
+
+def _channel_room(channel_id: int) -> Optional[str]:
+    """Return 'goo' or 'algo' based on channel."""
+    if channel_id == _pvp_channel_id(): return "goo"
+    if channel_id == _algo_channel_id(): return "algo"
+    return None
 
 
 
 async def _wrong_channel(interaction: discord.Interaction) -> bool:
     room = _channel_room(interaction.channel_id)
     if room is None:
-        channel_ids = [_room_channel_id(r) for r in ALL_ROOMS]
-        channels = " or ".join([f"<#{c}>" for c in channel_ids if c])
+        goo_id  = _pvp_channel_id()
+        algo_id = _algo_channel_id()
+        channels = " or ".join([f"<#{c}>" for c in [goo_id, algo_id] if c])
         await interaction.response.send_message(
-            f"PvP commands only work in a designated battle channel: {channels}.", ephemeral=True
+            f"PvP commands only work in {channels}.", ephemeral=True
         )
         return True
     return False
@@ -1065,10 +957,11 @@ class BoardState:
     def is_empty(self) -> bool:
         return self.challenger is None
 
-_boards: dict[str, "BoardState"] = {room: BoardState() for room in ALL_ROOMS}
+_board      = BoardState()  # GOO room
+_board_algo = BoardState()  # ALGO room
 
 def _get_board(room: str) -> BoardState:
-    return _boards.get(room, _boards["goo_1"])
+    return _board_algo if room == "algo" else _board
 
 
 # ─────────────────────────────────────────────
@@ -1295,7 +1188,7 @@ async def _handle_join(interaction: discord.Interaction):
         return
 
     # Check balance for the right room
-    if _is_algo_room(room):
+    if room == "algo":
         bal = _get_algo_balance(db, user_id)
         if bal < ALGO_WAGER_1V1:
             await interaction.followup.send(
@@ -1333,31 +1226,26 @@ async def _handle_join(interaction: discord.Interaction):
     now = datetime.now(timezone.utc)
     fighter_rows = []
 
-    # Fetch ALL cooldowns for this user in one query instead of N individual calls
-    asa_ids = [r["asa_id"] for r in roster_res.data]
-    cooldown_map: dict[str, datetime] = {}
-    try:
-        cd_res = db.table("pvp_cooldowns")                    .select("asa_id, expires_at")                    .in_("asa_id", asa_ids)                    .execute()
-        for cd in (cd_res.data or []):
-            cooldown_map[cd["asa_id"]] = datetime.fromisoformat(cd["expires_at"])
-    except Exception:
-        pass
-
     for r in roster_res.data:
         asa      = r["asa_id"]
         disabled = False
         suffix   = ""
 
-        # Cooldown check — use pre-fetched map
-        expires = cooldown_map.get(asa)
-        if expires and expires > now:
-            mins     = int((expires - now).total_seconds() / 60) + 1
-            disabled = True
-            suffix   = f" ({mins}m)"
+        # Cooldown check
+        try:
+            cd = db.table("pvp_cooldowns").select("expires_at").eq("asa_id", asa).execute()
+            if cd.data:
+                expires = datetime.fromisoformat(cd.data[0]["expires_at"])
+                if expires > now:
+                    mins     = int((expires - now).total_seconds() / 60) + 1
+                    disabled = True
+                    suffix   = f" ({mins}m)"
+        except Exception:
+            pass
 
         # In-queue check
         if not disabled:
-            for b in _boards.values():
+            for b in [_board, _board_algo]:
                 if b.challenger and b.challenger["asa_id"] == asa:
                     disabled = True
                     suffix   = " (in queue)"
@@ -1377,29 +1265,13 @@ async def _handle_join(interaction: discord.Interaction):
             "collection_name": coll.get("collection_name", "Unknown"),
         })
 
-    # Beginner room: filter to only fighters with at least one stat < BEGINNER_STAT_MAX
-    if _is_beginner_room(room):
-        eligible = [
-            f for f in fighter_rows
-            if f["attack"] < BEGINNER_STAT_MAX
-            or f["defense"] < BEGINNER_STAT_MAX
-            or f["speed"] < BEGINNER_STAT_MAX
-        ]
-        if not eligible:
-            await interaction.followup.send(
-                f"Your fighters have graduated from the beginner room! "
-                f"All stats are {BEGINNER_STAT_MAX}+. Head to the main arena.",
-                ephemeral=True)
-            return
-        fighter_rows = eligible
-
     # Sort: available first by power desc, then disabled by power desc
     fighter_rows.sort(key=lambda r: (r["disabled"], -r["power"]))
 
     async def on_pick(pick_interaction: discord.Interaction, asa_id: str):
         await _on_fighter_picked(pick_interaction, asa_id, user_id, db, room)
 
-    currency = f"{bal/1_000_000:g} ALGO" if _is_algo_room(room) else f"{bal:,} $GOO"
+    currency = f"{bal/1_000_000:g} ALGO" if room == "algo" else f"{bal:,} $GOO"
     view, content = _build_collection_picker(fighter_rows, on_pick, "Choose your fighter")
     await interaction.followup.send(
         f"{content}\n({currency} available)",
@@ -1433,7 +1305,7 @@ async def _on_fighter_picked(interaction: discord.Interaction,
             return
 
     # Check not already queued
-    for b in _boards.values():
+    for b in [_board, _board_algo]:
         if b.challenger and b.challenger["asa_id"] == str(asa_id):
             await interaction.followup.send(
                 "That fighter is already waiting in a battle queue!", ephemeral=True)
@@ -1463,14 +1335,14 @@ async def _on_fighter_picked(interaction: discord.Interaction,
 
     if board.is_empty:
         # Lock wager immediately on join
-        wager = ALGO_WAGER_1V1 if _is_algo_room(room) else GOO_WAGER_1V1
-        if _is_algo_room(room):
+        wager = ALGO_WAGER_1V1 if room == "algo" else GOO_WAGER_1V1
+        if room == "algo":
             locked = await asyncio.to_thread(_deduct_algo, db, user_id, wager, "wager hold — waiting for opponent")
         else:
             locked, _ = await asyncio.to_thread(_deduct, db, user_id, wager, "wager hold — waiting for opponent")
         if not locked:
-            wager_str   = f"{wager/1_000_000:g} ALGO" if _is_algo_room(room) else f"{wager:,} $GOO"
-            deposit_cmd = "`/pvp_deposit_algo`" if _is_algo_room(room) else "`/pvp_deposit`"
+            wager_str   = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
+            deposit_cmd = "`/pvp_deposit_algo`" if room == "algo" else "`/pvp_deposit`"
             await interaction.followup.send(
                 f"❌ Not enough funds. Need **{wager_str}** to join. Use {deposit_cmd}.",
                 ephemeral=True)
@@ -1484,7 +1356,7 @@ async def _on_fighter_picked(interaction: discord.Interaction,
             "room":     room,
             "wager":    wager,
         }
-        wager_str = f"{wager/1_000_000:g} ALGO" if _is_algo_room(room) else f"{wager:,} $GOO"
+        wager_str = f"{wager/1_000_000:g} ALGO" if room == "algo" else f"{wager:,} $GOO"
         await interaction.followup.send(
             f"**{stats.name}** is in the arena! **{wager_str}** held. Waiting for an opponent...",
             ephemeral=True)
@@ -1618,7 +1490,6 @@ class PvPCog(commands.Cog):
         self.expire_challenges.start()
         self.daily_leaderboard_post.start()
         self.weekly_pool_reset.start()
-        self.refresh_partner_cache.start()
         self.bot.add_view(JoinBattleView())
 
     def cog_unload(self):
@@ -1640,18 +1511,21 @@ class PvPCog(commands.Cog):
         await self._reload_boards()
 
     async def _reload_boards(self):
-        """Re-attach JoinBattleView to stored board messages on startup — all 6 rooms."""
+        """Re-attach JoinBattleView to stored board messages on startup."""
         await asyncio.sleep(3)  # give bot time to fully connect
         try:
             db = _db()
-            for room in ALL_ROOMS:
-                ch_id = _room_channel_id(room)
-                if not ch_id:
+            for room, board, env_key in [
+                ("goo",  _board,      "DISCORD_PVP_CHANNEL_ID"),
+                ("algo", _board_algo, "DISCORD_ALGO_CHANNEL_ID"),
+            ]:
+                ch_val = os.environ.get(env_key, "")
+                if not ch_val.strip().isdigit():
                     continue
+                ch_id = int(ch_val)
                 channel = self.bot.get_channel(ch_id)
                 if not channel:
                     continue
-                board = _get_board(room)
 
                 # Check Supabase for stored board msg id
                 row = db.table("pvp_board_state").select("board_msg_id") \
@@ -1668,7 +1542,7 @@ class PvPCog(commands.Cog):
                         pass
 
                 # No stored board — post a fresh one
-                buf  = await render_board("waiting", None, None, "No active challenge")
+                buf  = await render_board( "waiting", None, None, "No active challenge")
                 file = discord.File(buf, filename="board.png")
                 msg  = await channel.send(file=file, view=JoinBattleView())
                 board.board_msg_id = msg.id
@@ -2371,7 +2245,7 @@ class PvPCog(commands.Cog):
         if stats and stats.image_url:
             embed.set_thumbnail(url=stats.image_url)
         await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val} cost={algo_cost_micro/1_000_000:g} ALGO")
+        print(f"[PVP] Upgrade: uid={user_id} {stat} {current_val}>{new_val}")
 
     # /pvp_info
     # ─────────────────────────────────────────
@@ -2640,19 +2514,28 @@ class PvPCog(commands.Cog):
     @discord.app_commands.default_permissions(administrator=True)
     async def pvp_setupboard(self, interaction: discord.Interaction):
         if await _wrong_channel(interaction): return
-        room  = _channel_room(interaction.channel_id)
-        board = _get_board(room)
         await interaction.response.defer(ephemeral=True)
-        buf  = await render_board("waiting", None, None, "No active challenge")
+        buf  = await render_board( "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
-        board.board_msg_id = msg.id
-        board.reset()
-        db = _db()
-        db.table("pvp_board_state").upsert({
-            "room": room, "board_msg_id": str(msg.id),
-        }, on_conflict="room").execute()
-        await interaction.followup.send(f"{room} battle board posted! Pin it.", ephemeral=True)
+        _board.board_msg_id = msg.id
+        _board.reset()
+        await interaction.followup.send("GOO battle board posted! Pin it.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="pvp_setupboard_algo",
+        description="(Admin) Post the ALGO battle board in this channel"
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def pvp_setupboard_algo(self, interaction: discord.Interaction):
+        if await _wrong_channel(interaction): return
+        await interaction.response.defer(ephemeral=True)
+        buf  = await render_board( "waiting", None, None, "No active challenge")
+        file = discord.File(buf, filename="board.png")
+        msg  = await interaction.channel.send(file=file, view=JoinBattleView())
+        _board_algo.board_msg_id = msg.id
+        _board_algo.reset()
+        await interaction.followup.send("ALGO battle board posted! Pin it.", ephemeral=True)
 
     @discord.app_commands.command(
         name="pvp_refreshimage",
@@ -2719,83 +2602,6 @@ class PvPCog(commands.Cog):
             print(f"[ERROR] pvp_refreshimage: {e}")
             await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
-    @discord.app_commands.command(
-        name="pvp_backfill_images",
-        description="(Admin) Bulk re-fetch images for all roster rows with missing image URLs"
-    )
-    @discord.app_commands.default_permissions(administrator=True)
-    async def pvp_backfill_images(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            db = _db()
-            # Find ALL roster rows with missing images
-            rows = (
-                db.table("pvp_rosters")
-                .select("asa_id, nft_name, collection_id, image_url, pvp_collections(is_monstr)")
-                .execute()
-            )
-            missing_rows = [r for r in (rows.data or []) if not r.get("image_url")]
-            total = len(missing_rows)
-            if total == 0:
-                await interaction.followup.send("No roster rows with missing images. All good!", ephemeral=True)
-                return
-
-            await interaction.followup.send(
-                f"Starting backfill for **{total}** fighters with missing images. "
-                f"This runs in the background — check Railway logs for progress.",
-                ephemeral=True
-            )
-
-            async def _do_backfill():
-                ok = 0
-                fail = 0
-                skipped = 0
-                for r in missing_rows:
-                    asa_id   = r["asa_id"]
-                    coll_id  = int(r.get("collection_id") or 0)
-                    is_monstr = (r.get("pvp_collections") or {}).get("is_monstr", False)
-                    name     = r.get("nft_name", "?")
-                    url      = None
-
-                    # Skip Dark Coin Champions only if no token configured
-                    if coll_id == 6 and not os.environ.get("DARK_COIN_IPFS_TOKEN"):
-                        skipped += 1
-                        continue
-
-                    try:
-                        # Check local image map first (fast, no IPFS call)
-                        image_map = COLLECTION_IMAGE_MAPS.get(coll_id, {})
-                        if image_map:
-                            url = image_map.get(str(asa_id))
-
-                        # Fall back to ARC-19 live resolve for MONSTRs and unmapped ARC-19 collections
-                        if not url:
-                            url = await asyncio.wait_for(
-                                asyncio.to_thread(_resolve_arc19_image_url, asa_id),
-                                timeout=30
-                            )
-
-                        if url:
-                            db.table("pvp_rosters").update({"image_url": url}).eq("asa_id", asa_id).execute()
-                            if is_monstr:
-                                db.table("monstr_pvp_stats").update({"image_url": url}).eq("asa_id", asa_id).execute()
-                            print(f"[PVP] backfill ok: {name} ({asa_id})")
-                            ok += 1
-                        else:
-                            print(f"[PVP] backfill no-url: {name} ({asa_id})")
-                            fail += 1
-                    except Exception as e:
-                        print(f"[PVP] backfill failed: {name} ({asa_id}): {e}")
-                        fail += 1
-                    await asyncio.sleep(1)
-                print(f"[PVP] backfill complete: {ok} ok, {fail} failed, {skipped} skipped (Dark Coin) out of {total}")
-
-            asyncio.ensure_future(_do_backfill())
-
-        except Exception as e:
-            print(f"[ERROR] pvp_backfill_images: {e}")
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
-
     # ─────────────────────────────────────────
     # BATTLE RUNNER — round by round with delays
     # ─────────────────────────────────────────
@@ -2838,7 +2644,7 @@ class PvPCog(commands.Cog):
             await asyncio.sleep(1.5)
             if r.defender_hp <= 0: break
 
-        wager = ALGO_WAGER_1V1 if _is_algo_room(room) else GOO_WAGER_1V1
+        wager = GOO_WAGER_1V1
         if result.is_draw:
             _refund_wager(db, chal_id, wager, duel_id, "draw")
             _refund_wager(db, opp_id, wager, duel_id, "draw")
@@ -2848,7 +2654,7 @@ class PvPCog(commands.Cog):
             except Exception as e: print(f"[PVP] DB draw failed: {e}")
         else:
             winner_id  = result.winner_owner
-            is_algo    = _is_algo_room(room)
+            is_algo    = room == "algo"
             winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
             treasury   = ALGO_TREASURY   if is_algo else GOO_TREASURY_1V1
             if is_algo:
@@ -2880,16 +2686,16 @@ class PvPCog(commands.Cog):
                 wager_total = wager * 2   # both players contributed
                 rake_amount = int(wager_total * WEEKLY_RAKE_PCT)
                 _ensure_weekly_pools(db)
-                _add_to_weekly_pool(db, _pool_room(room), rake_amount)
-                print(f"[PVP] Weekly pool +{rake_amount} ({_pool_room(room)}) duel#{duel_id}")
+                _add_to_weekly_pool(db, room, rake_amount)
+                print(f"[PVP] Weekly pool +{rake_amount} ({room}) duel#{duel_id}")
             except Exception as e:
                 print(f"[PVP] weekly pool rake failed duel#{duel_id}: {e}")
 
             # ── Weekly leaderboard ────────────────────────────────────────
             loser_id = opp_id if winner_id == chal_id else chal_id
             try:
-                _upsert_leaderboard(db, winner_id, _pool_room(room), won=True)
-                _upsert_leaderboard(db, loser_id,  _pool_room(room), won=False)
+                _upsert_leaderboard(db, winner_id, room, won=True)
+                _upsert_leaderboard(db, loser_id,  room, won=False)
             except Exception as e:
                 print(f"[PVP] leaderboard upsert failed duel#{duel_id}: {e}")
 
@@ -2900,11 +2706,11 @@ class PvPCog(commands.Cog):
             else:
                 winner_m   = a if result.winner_asa == a.asa_id else b
                 winner_uname = await _get_display_name(channel.guild, winner_m.owner_id)
-                is_algo    = _is_algo_room(room)
+                is_algo    = room == "algo"
                 winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
                 win_info = WinnerInfo(monstr_name=winner_m.name, username=winner_uname,
                     total_rounds=result.total_rounds, wager_won=winner_cut,
-                    image_url=winner_m.image_url, is_draw=False, is_algo=_is_algo_room(room))
+                    image_url=winner_m.image_url, is_draw=False, is_algo=(room=="algo"))
             result_buf = await render_result(win_info)
             await channel.send(file=discord.File(result_buf, filename="result.png"))
         except Exception as e:
@@ -2918,13 +2724,12 @@ class PvPCog(commands.Cog):
         else:
             winner_m   = a if result.winner_asa == a.asa_id else b
             loser_m    = b if result.winner_asa == a.asa_id else a
-            is_algo    = _is_algo_room(room)
+            is_algo    = room == "algo"
             winner_cut = ALGO_WINNER_CUT if is_algo else GOO_WINNER_CUT_1V1
             prize_str  = f"{winner_cut/1_000_000:g} ALGO" if is_algo else f"{winner_cut:,} $GOO"
             await channel.send(
                 f"🏆 **{winner_m.name}** wins! Congratulations <@{winner_m.owner_id}>! 🎉\n"
-                + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪\n"
-                + (f"🏆 +{int(ALGO_WAGER_1V1 * 2 * WEEKLY_RAKE_PCT) / 1_000_000:g} ALGO added to the weekly prize pool!" if is_algo else f"🏆 +{int(GOO_WAGER_1V1 * 2 * WEEKLY_RAKE_PCT):,} $GOO added to the weekly prize pool!"))
+                + f"**+{prize_str}** credited. GG <@{loser_m.owner_id}>! 💪")
 
     async def _run_board_battle(self, channel, db: object, room: str = "goo",
                                  chal_id: str = "", chal_asa: str = "",
@@ -2932,7 +2737,7 @@ class PvPCog(commands.Cog):
                                  opp_id: str = "", opp_asa: str = "",
                                  opp_stats: MonstrStats = None, opp_uname: str = ""):
         """Full battle flow for either GOO or ALGO room."""
-        is_algo  = _is_algo_room(room)
+        is_algo  = room == "algo"
         wager    = ALGO_WAGER_1V1 if is_algo else GOO_WAGER_1V1
         board    = _get_board(room)
 
@@ -3020,23 +2825,22 @@ class PvPCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         db         = _db()
-        pool_key   = _pool_room(room)
-        rows       = _get_leaderboard(db, pool_key)
-        pool_bal   = _get_pool_balance(db, pool_key)
+        rows       = _get_leaderboard(db, room)
+        pool_bal   = _get_pool_balance(db, room)
         week_start = _current_week_start()
         week_end   = week_start + timedelta(days=7)
         now        = datetime.now(timezone.utc)
         days_left  = (week_end - now).days
         hours_left = int(((week_end - now).total_seconds() % 86400) / 3600)
 
-        currency   = "ALGO" if _is_algo_room(room) else "$GOO"
+        currency   = "ALGO" if room == "algo" else "$GOO"
         pool_str   = (
-            f"{pool_bal/1_000_000:g} ALGO" if _is_algo_room(room)
+            f"{pool_bal/1_000_000:g} ALGO" if room == "algo"
             else f"{pool_bal:,} $GOO"
         )
 
         embed = discord.Embed(
-            title=f"🏆 Weekly {'ALGO' if _is_algo_room(room) else 'GOO'} Arena Standings",
+            title=f"🏆 Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena Standings",
             description=(
                 f"**Prize Pool: {pool_str}** · "
                 f"winner in {days_left}d {hours_left}h"
@@ -3214,7 +3018,7 @@ class PvPCog(commands.Cog):
                 winner_wins = lb_rows[0]["wins"]
 
                 # Credit winner
-                if _is_algo_room(room):
+                if room == "algo":
                     credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
                 else:
                     credit_fn(db, winner_id, pool_bal, f"weekly pool win week={week_start.date()}")
@@ -3227,28 +3031,21 @@ class PvPCog(commands.Cog):
                 }).eq("id", pool_id).execute()
 
                 # Format payout string
-                is_algo_pool = (room == "algo")
-                if is_algo_pool:
+                if room == "algo":
                     prize_str = f"{pool_bal/1_000_000:g} ALGO"
                 else:
                     prize_str = f"{pool_bal:,} $GOO"
 
                 print(f"[PVP] Weekly pool paid room={room} winner={winner_id} amount={prize_str}")
 
-                # Post announcement to leaderboard channel + main channel
-                announcement = (
-                    f"🏆 **Weekly {'ALGO' if is_algo_pool else 'GOO'} Arena — Week Over!**\n\n"
-                    f"Congratulations <@{winner_id}>! 🎉\n"
-                    f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
-                    f"The board resets now. Good luck this week everyone! ⚔️"
-                )
+                # Post announcement
                 if channel:
-                    await channel.send(announcement)
-                main_ch_id = int(os.environ.get("DISCORD_MAIN_CHANNEL_ID", "0") or "0")
-                if main_ch_id and main_ch_id != (ch_id or 0):
-                    main_ch = self.bot.get_channel(main_ch_id)
-                    if main_ch:
-                        await main_ch.send(announcement)
+                    await channel.send(
+                        f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena — Week Over!**\n\n"
+                        f"Congratulations <@{winner_id}>! 🎉\n"
+                        f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
+                        f"The board resets now. Good luck this week everyone! ⚔️"
+                    )
 
             except Exception as e:
                 print(f"[PVP] Weekly reset failed room={room}: {e}")
@@ -3286,9 +3083,12 @@ class PvPCog(commands.Cog):
         """
         Poll the bot wallet for incoming $GOO transfers and credit
         the sender's PvP balance. Uses pvp_seen_deposits to avoid
-        double-crediting. Runs continuously — no active-window gate —
-        so deposits are never missed regardless of timing.
+        double-crediting.
+        Only runs while a deposit window is active (set by /pvp_deposit).
         """
+        import time
+        if time.time() > self._deposit_active_until:
+            return  # idle — skip this tick
         try:
             await self._process_deposits()
         except Exception as e:
@@ -3303,9 +3103,11 @@ class PvPCog(commands.Cog):
     @tasks.loop(seconds=120)
     async def poll_algo_deposits(self):
         """ALGO deposit detection via algosdk indexer — same approach as GOO poller.
-        Runs continuously — no active-window gate — so deposits are never missed
-        regardless of timing.
+        Only runs while a deposit window is active (set by /pvp_deposit_algo).
         """
+        import time
+        if time.time() > self._deposit_active_until:
+            return  # idle — skip this tick
         try:
             bot_addr = await asyncio.to_thread(_get_bot_address)
             db       = _db()
@@ -3443,27 +3245,6 @@ class PvPCog(commands.Cog):
             print(f"[PVP] deposit notify failed: {e}")
 
     # ─────────────────────────────────────────
-    # PARTNER ASSETS CACHE REFRESH
-    # ─────────────────────────────────────────
-
-    @tasks.loop(hours=4)
-    async def refresh_partner_cache(self):
-        """Rebuild PARTNER_ASSETS cache every 4 hours."""
-        global PARTNER_ASSETS
-        try:
-            new_cache = await asyncio.to_thread(_build_partner_assets_cache)
-            PARTNER_ASSETS.clear()
-            PARTNER_ASSETS.update(new_cache)
-            total = sum(len(v) for v in PARTNER_ASSETS.values())
-            print(f"[PVP] partner cache refreshed: {len(PARTNER_ASSETS)} collections, {total} total ASAs")
-        except Exception as e:
-            print(f"[PVP] refresh_partner_cache error: {e}")
-
-    @refresh_partner_cache.before_loop
-    async def before_refresh_partner_cache(self):
-        await self.bot.wait_until_ready()
-
-    # ─────────────────────────────────────────
     # CHALLENGE EXPIRY LOOP
     # ─────────────────────────────────────────
 
@@ -3477,7 +3258,7 @@ class PvPCog(commands.Cog):
             ).lt("expires_at", datetime.now(timezone.utc).isoformat()).execute()
 
             # Refund challenger if they're waiting and board has been idle too long
-            for room, board in _boards.items():
+            for room, board in [("goo", _board), ("algo", _board_algo)]:
                 if board.challenger and board.challenger.get("wager"):
                     # If challenger has been waiting > 10 minutes, refund and clear
                     # (board.challenger doesn't store a timestamp so just keep it alive for now)
