@@ -965,11 +965,22 @@ class BoardState:
     def is_empty(self) -> bool:
         return self.challenger is None
 
-_board      = BoardState()  # GOO room
-_board_algo = BoardState()  # ALGO room
+_boards: dict[str, BoardState] = {
+    "goo":           BoardState(),
+    "goo_2":         BoardState(),
+    "goo_beginner":  BoardState(),
+    "algo":          BoardState(),
+    "algo_2":        BoardState(),
+    "algo_beginner": BoardState(),
+}
+
+_board      = _boards["goo"]   # legacy reference
+_board_algo = _boards["algo"]  # legacy reference
+
+_ALL_BOARDS = list(_boards.values())
 
 def _get_board(room: str) -> BoardState:
-    return _board_algo if room == "algo" else _board
+    return _boards.get(room, _boards["goo"])
 
 
 # ─────────────────────────────────────────────
@@ -1253,9 +1264,9 @@ async def _handle_join(interaction: discord.Interaction):
         except Exception:
             pass
 
-        # In-queue check
+        # In-queue check — can't queue same fighter in multiple rooms
         if not disabled:
-            for b in [_board, _board_algo]:
+            for b in _ALL_BOARDS:
                 if b.challenger and b.challenger["asa_id"] == asa:
                     disabled = True
                     suffix   = " (in queue)"
@@ -1328,8 +1339,8 @@ async def _on_fighter_picked(interaction: discord.Interaction,
                 f"That fighter is cooling down. Ready in **{mins} min**.", ephemeral=True)
             return
 
-    # Check not already queued
-    for b in [_board, _board_algo]:
+    # Check not already queued (same fighter can't be in two rooms)
+    for b in _ALL_BOARDS:
         if b.challenger and b.challenger["asa_id"] == str(asa_id):
             await interaction.followup.send(
                 "That fighter is already waiting in a battle queue!", ephemeral=True)
@@ -1540,12 +1551,12 @@ class PvPCog(commands.Cog):
         try:
             db = _db()
             for room, board, env_key in [
-                ("goo",           _board,      "DISCORD_GOO_1_CHANNEL_ID"),
-                ("goo_2",         _board,      "DISCORD_GOO_2_CHANNEL_ID"),
-                ("goo_beginner",  _board,      "DISCORD_GOO_BEGINNER_CHANNEL_ID"),
-                ("algo",          _board_algo, "DISCORD_ALGO_1_CHANNEL_ID"),
-                ("algo_2",        _board_algo, "DISCORD_ALGO_2_CHANNEL_ID"),
-                ("algo_beginner", _board_algo, "DISCORD_ALGO_BEGINNER_CHANNEL_ID"),
+                ("goo",           _boards["goo"],           "DISCORD_GOO_1_CHANNEL_ID"),
+                ("goo_2",         _boards["goo_2"],         "DISCORD_GOO_2_CHANNEL_ID"),
+                ("goo_beginner",  _boards["goo_beginner"],  "DISCORD_GOO_BEGINNER_CHANNEL_ID"),
+                ("algo",          _boards["algo"],          "DISCORD_ALGO_1_CHANNEL_ID"),
+                ("algo_2",        _boards["algo_2"],        "DISCORD_ALGO_2_CHANNEL_ID"),
+                ("algo_beginner", _boards["algo_beginner"], "DISCORD_ALGO_BEGINNER_CHANNEL_ID"),
             ]:
                 ch_val = os.environ.get(env_key, "")
                 if not ch_val.strip().isdigit():
@@ -2546,9 +2557,11 @@ class PvPCog(commands.Cog):
         buf  = await render_board( "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
-        _board.board_msg_id = msg.id
-        _board.reset()
-        await interaction.followup.send("GOO battle board posted! Pin it.", ephemeral=True)
+        room = _channel_room(interaction.channel_id) or "goo"
+        board = _get_board(room)
+        board.board_msg_id = msg.id
+        board.reset()
+        await interaction.followup.send("Battle board posted! Pin it.", ephemeral=True)
 
     @discord.app_commands.command(
         name="pvp_setupboard_algo",
@@ -2561,8 +2574,10 @@ class PvPCog(commands.Cog):
         buf  = await render_board( "waiting", None, None, "No active challenge")
         file = discord.File(buf, filename="board.png")
         msg  = await interaction.channel.send(file=file, view=JoinBattleView())
-        _board_algo.board_msg_id = msg.id
-        _board_algo.reset()
+        room = _channel_room(interaction.channel_id) or "algo"
+        board = _get_board(room)
+        board.board_msg_id = msg.id
+        board.reset()
         await interaction.followup.send("ALGO battle board posted! Pin it.", ephemeral=True)
 
     @discord.app_commands.command(
@@ -3308,10 +3323,8 @@ class PvPCog(commands.Cog):
             ).lt("expires_at", datetime.now(timezone.utc).isoformat()).execute()
 
             # Refund challenger if they're waiting and board has been idle too long
-            for room, board in [("goo", _board), ("algo", _board_algo)]:
+            for room, board in _boards.items():
                 if board.challenger and board.challenger.get("wager"):
-                    # If challenger has been waiting > 10 minutes, refund and clear
-                    # (board.challenger doesn't store a timestamp so just keep it alive for now)
                     pass
 
         except Exception as e:
