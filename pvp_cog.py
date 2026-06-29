@@ -664,11 +664,13 @@ def _current_week_start() -> datetime:
     """
     Return the start of the current weekly period.
     Week starts Monday 00:00 UTC (= Sunday 7PM EST).
+    Always returns a timezone-aware datetime normalized to midnight UTC
+    so .isoformat() produces a consistent string across all callers.
     """
     now = datetime.now(timezone.utc)
     days_since_monday = now.weekday()  # Monday=0
     week_start = (now - timedelta(days=days_since_monday)).replace(
-        hour=0, minute=0, second=0, microsecond=0
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
     )
     return week_start
 
@@ -1375,6 +1377,14 @@ async def _on_fighter_picked(interaction: discord.Interaction,
     if not stats:
         await interaction.followup.send("Couldn't load stats. Try again.", ephemeral=True)
         return
+
+    # FIX: server-side beginner check — picker UI can be bypassed via "Enter ASA ID" modal
+    if _is_beginner_room(room):
+        if stats.attack > 20 or stats.defense > 20 or stats.speed > 20:
+            await interaction.followup.send(
+                "❌ **Beginner room** — all stats must be **20 or under**. "
+                "This fighter is too strong for this room.", ephemeral=True)
+            return
 
     username = interaction.user.display_name
 
@@ -2697,10 +2707,16 @@ class PvPCog(commands.Cog):
             await asyncio.sleep(1.5)
             if r.defender_hp <= 0: break
 
-        wager = GOO_WAGER_1V1
+        # FIX: was hardcoded to GOO_WAGER_1V1 — broke draws in ALGO/algo_2/algo_beginner rooms
+        is_algo = _base_room(room) == "algo"
+        wager   = ALGO_WAGER_1V1 if is_algo else GOO_WAGER_1V1
         if result.is_draw:
-            _refund_wager(db, chal_id, wager, duel_id, "draw")
-            _refund_wager(db, opp_id, wager, duel_id, "draw")
+            if is_algo:
+                _credit_algo(db, chal_id, wager, f"draw refund duel#{duel_id}")
+                _credit_algo(db, opp_id,  wager, f"draw refund duel#{duel_id}")
+            else:
+                _refund_wager(db, chal_id, wager, duel_id, "draw")
+                _refund_wager(db, opp_id,  wager, duel_id, "draw")
             try:
                 db.table("pvp_duels").update({"status": "draw", "battle_log": battle_log,
                     "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", duel_id).execute()
@@ -2790,7 +2806,7 @@ class PvPCog(commands.Cog):
                                  opp_id: str = "", opp_asa: str = "",
                                  opp_stats: MonstrStats = None, opp_uname: str = ""):
         """Full battle flow for either GOO or ALGO room."""
-        is_algo  = room == "algo"
+        is_algo  = _base_room(room) == "algo"   # FIX: was `room == "algo"` — broke algo_2 and algo_beginner
         wager    = ALGO_WAGER_1V1 if is_algo else GOO_WAGER_1V1
         board    = _get_board(room)
 
@@ -3112,15 +3128,18 @@ class PvPCog(commands.Cog):
                 print(f"[PVP] Weekly pool paid room={room} winner={winner_id} amount={prize_str}")
 
                 # Post announcement with role pings
+                # FIX: previous code had an operator-precedence bug where the f-string
+                # ternary ate the entire announcement body when ping was truthy.
                 if channel:
                     ping = _role_ping_str()
-                    await channel.send(
-                        f"{ping}\n" if ping else "" +
+                    announcement = (
+                        (f"{ping}\n" if ping else "") +
                         f"🏆 **Weekly {'ALGO' if room == 'algo' else 'GOO'} Arena — Week Over!**\n\n"
                         f"Congratulations <@{winner_id}>! 🎉\n"
                         f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
                         f"The board resets now. Good luck this week everyone! ⚔️"
                     )
+                    await channel.send(announcement)
 
             except Exception as e:
                 print(f"[PVP] Weekly reset failed room={room}: {e}")
