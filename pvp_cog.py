@@ -2699,11 +2699,27 @@ class PvPCog(commands.Cog):
         status_msg = await channel.send(_status())
         round_msg  = await channel.send("⚔️ Battle starting...")
 
+        async def _safe_edit(msg, **kwargs):
+            """Edit a message with one retry on transient Discord 5xx errors."""
+            for attempt in range(2):
+                try:
+                    await msg.edit(**kwargs)
+                    return
+                except discord.errors.DiscordServerError as e:
+                    if attempt == 0:
+                        print(f"[PVP] Discord 5xx on edit (attempt 1), retrying: {e}")
+                        await asyncio.sleep(2)
+                    else:
+                        print(f"[PVP] Discord 5xx on edit (attempt 2), skipping round display: {e}")
+                except Exception as e:
+                    print(f"[PVP] Unexpected edit error, skipping round display: {e}")
+                    return
+
         for r in result.rounds:
             if r.attacker_id == a.asa_id: hp_b = r.defender_hp
             else: hp_a = r.defender_hp
-            await round_msg.edit(content=r.flavor)
-            await status_msg.edit(content=_status())
+            await _safe_edit(round_msg,  content=r.flavor)
+            await _safe_edit(status_msg, content=_status())
             await asyncio.sleep(1.5)
             if r.defender_hp <= 0: break
 
