@@ -849,17 +849,34 @@ def _algo_channel_id() -> Optional[int]:
     return int(val) if val else None
 
 def _channel_room(channel_id: int) -> Optional[str]:
-    """Return 'goo', 'algo', 'goo_beginner', or 'algo_beginner' based on channel."""
+    """
+    Return one of: 'goo', 'goo_2', 'goo_beginner', 'algo', 'algo_2', 'algo_beginner'
+    based on which channel the interaction came from.
+
+    FIX: previous version grouped GOO_1/GOO_2/PVP_LEGACY into a single set and
+    ALGO_1/ALGO_2/ALGO_LEGACY into another, then returned the same "goo"/"algo"
+    string for all of them. That meant GOO room 1 and GOO room 2 (and ALGO room 1
+    and ALGO room 2) shared one BoardState — so a player queued in GOO 1 looked
+    "already queued" the instant they tried GOO 2, since it was literally the same
+    lobby object. Each channel must now map to its own distinct room key.
+    """
     cid = str(channel_id)
-    goo_ids  = {os.environ.get(k, "") for k in ["DISCORD_GOO_1_CHANNEL_ID", "DISCORD_GOO_2_CHANNEL_ID", "DISCORD_PVP_CHANNEL_ID"]}
-    algo_ids = {os.environ.get(k, "") for k in ["DISCORD_ALGO_1_CHANNEL_ID", "DISCORD_ALGO_2_CHANNEL_ID", "DISCORD_ALGO_CHANNEL_ID"]}
-    goo_beg  = os.environ.get("DISCORD_GOO_BEGINNER_CHANNEL_ID", "")
-    algo_beg = os.environ.get("DISCORD_ALGO_BEGINNER_CHANNEL_ID", "")
-    if cid == goo_beg:   return "goo_beginner"
-    if cid == algo_beg:  return "algo_beginner"
-    if cid in goo_ids:   return "goo"
-    if cid in algo_ids:  return "algo"
-    return None
+
+    channel_map = {
+        os.environ.get("DISCORD_GOO_1_CHANNEL_ID", ""):       "goo",
+        os.environ.get("DISCORD_GOO_2_CHANNEL_ID", ""):       "goo_2",
+        os.environ.get("DISCORD_GOO_BEGINNER_CHANNEL_ID", ""): "goo_beginner",
+        os.environ.get("DISCORD_ALGO_1_CHANNEL_ID", ""):      "algo",
+        os.environ.get("DISCORD_ALGO_2_CHANNEL_ID", ""):      "algo_2",
+        os.environ.get("DISCORD_ALGO_BEGINNER_CHANNEL_ID", ""): "algo_beginner",
+        # Legacy fallback env vars — only used if the dedicated room-1 var isn't set
+        os.environ.get("DISCORD_PVP_CHANNEL_ID", ""):         "goo",
+        os.environ.get("DISCORD_ALGO_CHANNEL_ID", ""):        "algo",
+    }
+    # Remove empty-string keys so unset env vars don't collide and match channel "0"/""
+    channel_map.pop("", None)
+
+    return channel_map.get(cid)
 
 def _is_beginner_room(room: str) -> bool:
     return "beginner" in room
