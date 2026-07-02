@@ -3053,7 +3053,11 @@ class PvPCog(commands.Cog):
                         lines.append(f"\n*Use `/pvp_leaderboard` to see the full top 10.*")
 
                 ping = _role_ping_str()
-                await channel.send(("\n".join(lines) + (f"\n{ping}" if ping else "")))
+                msg = "\n".join(lines) + (f"\n{ping}" if ping else "")
+                await channel.send(
+                    msg,
+                    allowed_mentions=discord.AllowedMentions(roles=True),
+                )
                 print(f"[PVP] Daily leaderboard posted room={room}")
             except Exception as e:
                 print(f"[PVP] daily_leaderboard_post failed room={room}: {e}")
@@ -3172,7 +3176,10 @@ class PvPCog(commands.Cog):
                         f"**{winner_wins} wins** this week takes the pot: **{prize_str}**\n\n"
                         f"The board resets now. Good luck this week everyone! ⚔️"
                     )
-                    await channel.send(announcement)
+                    await channel.send(
+                        announcement,
+                        allowed_mentions=discord.AllowedMentions(roles=True, users=True),
+                    )
 
             except Exception as e:
                 print(f"[PVP] Weekly reset failed room={room}: {e}")
