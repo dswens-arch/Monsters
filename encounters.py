@@ -2492,11 +2492,7 @@ class EncounterState:
 
         if self.hp <= 0 and self.alive:
             self.alive = False
-            if user_id != self.first_striker:
-                self.kill_shotter = user_id
-            else:
-                others = [uid for uid in self.attackers_ordered if uid != user_id]
-                self.kill_shotter = others[0] if others else None
+            self.kill_shotter = user_id
             events.append("kill_shot")
 
         return {
@@ -3365,7 +3361,8 @@ class EncountersCog(commands.Cog):
             try:
                 db = get_supabase()
                 for uid, dmg in state.damage_dealt.items():
-                    got_kill = uid == state.kill_shotter
+                    all_ks = set(state.wave_kills + ([state.kill_shotter] if state.kill_shotter else []))
+                    got_kill = uid in all_ks
                     attacks = state.attack_counts.get(uid, 0)
                     crits = state.crit_counts.get(uid, 0)
                     goo = payouts.get(uid, 0)
@@ -3431,7 +3428,8 @@ class EncountersCog(commands.Cog):
 
                     bp_map = {}
                     for uid, dmg in state.damage_dealt.items():
-                        got_kill = uid == state.kill_shotter
+                        all_ks = set(state.wave_kills + ([state.kill_shotter] if state.kill_shotter else []))
+                        got_kill = uid in all_ks
                         crits    = state.crit_counts.get(uid, 0)
 
                         wallet = wallet_map.get(str(uid))
@@ -3804,6 +3802,8 @@ class EncountersCog(commands.Cog):
         channel = interaction.channel
         if "first_strike" in events:
             await channel.send(f"🥊 **First Strike!** <@{user_id}> drew first blood on Wave {state.wave_num}!")
+        if "kill_shot" in events:
+            await channel.send(f"💀 **Kill Shot!** <@{user_id}> landed the finishing blow on Wave {state.wave_num}!")
         if result["is_crit"] and "first_strike" not in events:
             await channel.send(f"⚡ **CRITICAL HIT!** <@{user_id}> landed a massive blow!")
 
