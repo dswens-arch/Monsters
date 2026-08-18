@@ -2149,7 +2149,7 @@ MONSTR_ASSETS = {
     "3294939701": ("MONSTR #1998", "QmdbqE9Bc2YJca5Nbo5JPA9LaEwn4XcickCtX7zpY7BH6P"),
 }
 
-IPFS_GATEWAY = "https://ipfs.algonode.xyz/ipfs/"
+IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"
 
 
 def decode_arc19_reserve(reserve_address: str) -> str | None:
@@ -2235,11 +2235,11 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
 
         # Step 3: Fetch metadata JSON from IPFS — try multiple gateways
         METADATA_GATEWAYS = [
-            "https://ipfs.algonode.xyz/ipfs/",
-            "https://ipfs.io/ipfs/",
             "https://gateway.pinata.cloud/ipfs/",
-            "https://cloudflare-ipfs.com/ipfs/",
+            "https://ipfs.algonode.xyz/ipfs/",
             "https://dweb.link/ipfs/",
+            "https://flk-ipfs.xyz/ipfs/",
+            "https://ipfs.io/ipfs/",
         ]
 
         metadata = None
@@ -2271,11 +2271,11 @@ async def fetch_live_image_url(asa_id: str) -> str | None:
         image_cid = image_field.replace("ipfs://", "")
 
         IMAGE_GATEWAYS = [
-            "https://ipfs.algonode.xyz/ipfs/",
-            "https://ipfs.io/ipfs/",
             "https://gateway.pinata.cloud/ipfs/",
-            "https://cloudflare-ipfs.com/ipfs/",
+            "https://ipfs.algonode.xyz/ipfs/",
             "https://dweb.link/ipfs/",
+            "https://flk-ipfs.xyz/ipfs/",
+            "https://ipfs.io/ipfs/",
         ]
 
         for gw in IMAGE_GATEWAYS:
