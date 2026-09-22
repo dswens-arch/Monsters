@@ -174,3 +174,48 @@ def get_bot_goo_balance() -> int:
     except Exception as e:
         print(f"[WALLET] balance check failed: {e}")
         return 0
+
+
+# ─────────────────────────────────────────────
+# LOOK UP CURRENT ON-CHAIN HOLDER OF AN ASA
+# Used for MONSTR holder payout in encounters
+# ─────────────────────────────────────────────
+
+def get_asa_holder(asa_id: int) -> str | None:
+    """
+    Returns the wallet address currently holding the given ASA,
+    or None if it can't be determined.
+
+    Queries the indexer for accounts holding a non-zero balance
+    of the asset. For 1-of-1 NFTs there should be exactly one.
+    """
+    try:
+        import urllib.request
+        import json
+
+        indexer_url = os.getenv("INDEXER_URL", "https://mainnet-idx.algonode.cloud")
+        token = os.getenv("INDEXER_TOKEN", "")
+
+        url = f"{indexer_url}/v2/assets/{asa_id}/balances?currency-greater-than=0"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "X-Indexer-API-Token": token,
+        })
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+
+        balances = data.get("balances", [])
+        if not balances:
+            print(f"[WALLET] No holder found for ASA {asa_id}")
+            return None
+
+        # Return the address with the highest balance (handles edge cases)
+        holder = max(balances, key=lambda b: b.get("amount", 0))
+        address = holder.get("address")
+        print(f"[WALLET] Holder of ASA {asa_id}: {address[:10]}...")
+        return address
+
+    except Exception as e:
+        print(f"[WALLET] get_asa_holder failed for ASA {asa_id}: {e}")
+        return None
