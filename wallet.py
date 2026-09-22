@@ -24,7 +24,7 @@ Recommended free nodes:
 
 import os
 import time
-from algosdk import mnemonic, transaction
+from algosdk import mnemonic, transaction, account
 from algosdk.v2client import algod, indexer
 
 
@@ -50,7 +50,7 @@ def get_bot_account() -> tuple[str, str]:
     if not mn:
         raise EnvironmentError("BOT_MNEMONIC env var not set.")
     private_key = mnemonic.to_private_key(mn)
-    address = mnemonic.to_public_key(mn)
+    address = account.address_from_private_key(private_key)
     return private_key, address
 
 def get_goo_asset_id() -> int:
