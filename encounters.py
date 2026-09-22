@@ -2358,6 +2358,14 @@ FIRST_STRIKE_BONUS = 500
 TEAM_BONUS_POOL    = 750
 TOTAL_GOO          = DAMAGE_POOL + KILL_SHOT_BONUS + FIRST_STRIKE_BONUS + TEAM_BONUS_POOL  # 5000
 BOSS_MULTIPLIER    = 3
+
+# ── MONSTR Holder Reserve ──
+# 3% per wave (150 GOO) reserved for the on-chain holder of that wave's MONSTR.
+# If players clear the wave → holder gets 150 GOO.
+# If the MONSTR survives the encounter (time out) → that holder gets the full 450 GOO (9%).
+# If holder is not registered in the game, the cut simply isn't sent.
+HOLDER_WAVE_CUT    = 150   # per defeated wave
+HOLDER_FULL_CUT    = 450   # if MONSTR survives entire encounter
 ENCOUNTER_DURATION = 600   # 10 minutes total for all waves
 CRIT_CHANCE        = 0.05  # 5%
 WAVE_COUNT         = 3     # MONSTRs per encounter (boss = 1)
@@ -2406,6 +2414,11 @@ class EncounterState:
         self.kill_shotter:        int | None = None
         self.wave_kills:          list[int | None] = []  # kill shotter per wave
         self.wave_first_strikers: list[int | None] = []  # first striker per wave
+
+        # Holder payout tracking
+        # Maps wave_index (0-based) → wallet address of that MONSTR's on-chain holder
+        # Populated async after encounter starts. None = holder not registered / lookup failed.
+        self.holder_wallets: dict[int, str | None] = {}
 
         # Init first wave
         self._init_wave()
@@ -3212,6 +3225,9 @@ class EncountersCog(commands.Cog):
         # Post first wave embed
         await self._post_wave_embed(channel, prefix)
 
+        # Resolve holder wallets async in background — won't block the encounter
+        asyncio.create_task(self._resolve_holder_wallets(self.active_encounter))
+
         # Run timed encounter — handle wave transitions
         end_time = asyncio.get_event_loop().time() + ENCOUNTER_DURATION
         while True:
@@ -3220,6 +3236,9 @@ class EncountersCog(commands.Cog):
                 break  # Time expired
             state = self.active_encounter
             if state and not state.alive:
+                # Capture wave index before advancing (next_wave() increments it)
+                defeated_wave_index = state.wave_index
+
                 # Build the defeated embed BEFORE advancing — state still points to the dead wave
                 if self.encounter_message:
                     try:
@@ -3228,6 +3247,9 @@ class EncountersCog(commands.Cog):
                         print(f"[WAVE] Wave {state.wave_num} marked defeated, buttons removed")
                     except Exception as e:
                         print(f"[WAVE] Could not mark wave as defeated: {e}")
+
+                # Pay the holder of this defeated wave's MONSTR
+                await self._pay_holder(defeated_wave_index, HOLDER_WAVE_CUT, state, channel, test_mode)
 
                 has_next = state.next_wave()
                 if has_next:
@@ -3242,6 +3264,79 @@ class EncountersCog(commands.Cog):
 
         await self._close_encounter(channel, test_mode=test_mode)
 
+    async def _resolve_holder_wallets(self, state: EncounterState) -> None:
+        """
+        For each wave MONSTR, look up the current on-chain holder and cross-reference
+        against linked_wallets. Stores wallet address in state.holder_wallets[wave_index],
+        or None if not found / not registered.
+        """
+        from wallet import get_asa_holder
+        db = get_supabase()
+
+        for i, monstr in enumerate(state.monstrs):
+            asa_id = monstr.get("asa_id")
+            if not asa_id:
+                state.holder_wallets[i] = None
+                continue
+            try:
+                # Look up on-chain holder
+                holder_address = await asyncio.to_thread(get_asa_holder, int(asa_id))
+                if not holder_address:
+                    print(f"[HOLDER] No on-chain holder found for ASA {asa_id} (wave {i+1})")
+                    state.holder_wallets[i] = None
+                    continue
+
+                # Cross-reference against linked_wallets
+                row = db.table("linked_wallets") \
+                        .select("user_id") \
+                        .eq("wallet_address", holder_address) \
+                        .execute()
+
+                if row.data:
+                    state.holder_wallets[i] = holder_address
+                    print(f"[HOLDER] Wave {i+1} ASA {asa_id} holder registered: {holder_address[:10]}...")
+                else:
+                    state.holder_wallets[i] = None
+                    print(f"[HOLDER] Wave {i+1} ASA {asa_id} holder {holder_address[:10]}... not registered — skipping payout")
+
+            except Exception as e:
+                print(f"[HOLDER] Lookup failed for wave {i+1} ASA {asa_id}: {e}")
+                state.holder_wallets[i] = None
+
+    async def _pay_holder(self, wave_index: int, amount: int, state: EncounterState,
+                          channel: discord.TextChannel, test_mode: bool = False) -> None:
+        """
+        Send GOO to the holder of a wave's MONSTR if they are registered.
+        Sends directly on-chain (not via the balance system) since this is
+        an external payout, not a player balance credit.
+        """
+        from wallet import send_goo
+        wallet_address = state.holder_wallets.get(wave_index)
+        asa_id = state.monstrs[wave_index].get("asa_id", "?")
+
+        if not wallet_address:
+            print(f"[HOLDER] No registered holder for wave {wave_index+1} — skipping {amount} GOO")
+            return
+
+        if test_mode:
+            print(f"[HOLDER][TEST] Would send {amount} GOO to {wallet_address[:10]}... (wave {wave_index+1} ASA {asa_id})")
+            return
+
+        try:
+            tx_id = await asyncio.to_thread(
+                send_goo,
+                wallet_address,
+                amount,
+                f"MONSTRS holder reward — ASA {asa_id}"
+            )
+            print(f"[HOLDER] Sent {amount} GOO to holder of ASA {asa_id} — TxID: {tx_id}")
+            await channel.send(
+                f"👑 **MONSTR Holder Reward!** The holder of ASA #{asa_id} earns "
+                f"**{amount:,} $GOO** — sent to wallet!"
+            )
+        except Exception as e:
+            print(f"[HOLDER] Payment failed for wave {wave_index+1} ASA {asa_id}: {e}")
+
     async def _close_encounter(self, channel: discord.TextChannel, test_mode: bool = False):
         state = self.active_encounter
         if not state:
@@ -3250,14 +3345,32 @@ class EncountersCog(commands.Cog):
 
         print(f"[CLOSE] Closing encounter for {state.monstr['name']} — {len(state.damage_dealt)} attackers")
 
-        # Always mark the final wave message as defeated with buttons removed
-        if self.encounter_message:
+        all_waves_done = state.wave_index >= state.total_waves
+
+        # Only show "defeated" embed on final wave if it was actually defeated.
+        # If time ran out and the MONSTR is still alive, leave the embed as-is —
+        # the escaped embed below will replace it.
+        if self.encounter_message and not state.alive:
             try:
                 defeated_embed = self._build_defeated_embed(state)
                 await self.encounter_message.edit(embed=defeated_embed, view=discord.ui.View())
                 print("[CLOSE] Final wave marked defeated")
             except Exception as e:
                 print(f"[CLOSE] Could not mark final wave defeated: {e}")
+        elif self.encounter_message and state.alive:
+            # MONSTR survived — remove buttons but don't stamp it as defeated
+            try:
+                await self.encounter_message.edit(view=discord.ui.View())
+            except Exception:
+                pass
+
+        # ── MONSTR Holder Survivor Payout ──
+        # If the encounter ended with a MONSTR still alive, that wave's holder
+        # gets the full 9% (450 GOO) instead of the per-wave 150 GOO cuts.
+        if state.alive and not all_waves_done:
+            surviving_wave_index = state.wave_index
+            print(f"[HOLDER] MONSTR survived — wave {surviving_wave_index+1} holder gets full cut ({HOLDER_FULL_CUT} GOO)")
+            await self._pay_holder(surviving_wave_index, HOLDER_FULL_CUT, state, channel, test_mode)
         payouts = state.calculate_payouts()
         print(f"[CLOSE] Payouts calculated: {payouts}")
 
@@ -3290,7 +3403,6 @@ class EncountersCog(commands.Cog):
             print("[TEST] GOO payout skipped in test mode")
 
         # ── Show escaped state on main embed if time ran out ──
-        all_waves_done = state.wave_index >= state.total_waves
         if not all_waves_done and self.encounter_message:
             try:
                 escaped_embed = discord.Embed(
