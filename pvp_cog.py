@@ -238,10 +238,10 @@ def _get_linked_wallet(user_id: str) -> Optional[str]:
 
 def _get_bot_keypair():
     """Return (private_key, address) for the bot wallet."""
-    from algosdk import mnemonic as _mn
+    from algosdk import mnemonic as _mn, account as _acct
     mn = os.environ["BOT_MNEMONIC"]
     pk = _mn.to_private_key(mn)
-    addr = _mn.to_public_key(mn)
+    addr = _acct.address_from_private_key(pk)
     return pk, addr
 
 
